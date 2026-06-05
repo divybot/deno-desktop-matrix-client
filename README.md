@@ -12,27 +12,27 @@ native **notifications**.
 
 <!-- Drop screenshots into screenshots/ and they'll show up here. -->
 
-| Main window | Login |
-| --- | --- |
-| ![Main window — room list, timeline, composer](screenshots/main.png) | ![Login screen](screenshots/login.png) |
+| Main window                                                         | Tray                                  |
+|---------------------------------------------------------------------|---------------------------------------|
+| ![Main window — room list, timeline, composer](screenshots/app.png) | ![Login screen](screenshots/tray.png) |
 
-| Tray menu | Notification |
-| --- | --- |
-| ![Tray popover menu](screenshots/tray.png) | ![Native notification](screenshots/notification.png) |
+| Menu                                       | Dock                                         |
+|--------------------------------------------|----------------------------------------------|
+| ![Tray popover menu](screenshots/menu.png) | ![Native notification](screenshots/dock.png) |
 
 ## Architecture
 
 The **Matrix SDK runs in the Deno process**, not the webview. The webview is a
 thin renderer that calls bindings and listens to a live event stream.
 
-| File | Side | Responsibility |
-| ---- | ---- | -------------- |
-| `matrix.ts` | Deno | `MatrixEngine` — all `matrix-js-sdk` logic (login, sync, rooms, timeline, send, crypto, markdown). Framework-agnostic, so it's unit-testable headlessly. |
-| `main.ts` | Deno | Serves the UI + an SSE stream (`Deno.serve`), opens the `Deno.BrowserWindow`, exposes the engine as `bind()` handlers, and owns the desktop chrome (tray, dock badge, menu bar, notifications, window lifecycle). |
-| `app.js` | Webview | No SDK. Calls bindings, subscribes to SSE, renders the UI. |
-| `index.html`, `styles.css` | Webview | Static shell, embedded into the binary via `import … with { type: "text" }`. |
-| `icon.png` | — | App icon (build-time). The tray icon is generated in code. |
-| `test_matrix.ts` | — | Headless verification harness for the engine. |
+| File                       | Side    | Responsibility                                                                                                                                                                                                    |
+|----------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `matrix.ts`                | Deno    | `MatrixEngine` — all `matrix-js-sdk` logic (login, sync, rooms, timeline, send, crypto, markdown). Framework-agnostic, so it's unit-testable headlessly.                                                          |
+| `main.ts`                  | Deno    | Serves the UI + an SSE stream (`Deno.serve`), opens the `Deno.BrowserWindow`, exposes the engine as `bind()` handlers, and owns the desktop chrome (tray, dock badge, menu bar, notifications, window lifecycle). |
+| `app.js`                   | Webview | No SDK. Calls bindings, subscribes to SSE, renders the UI.                                                                                                                                                        |
+| `index.html`, `styles.css` | Webview | Static shell, embedded into the binary via `import … with { type: "text" }`.                                                                                                                                      |
+| `icon.png`                 | —       | App icon (build-time). The tray icon is generated in code.                                                                                                                                                        |
+| `test_matrix.ts`           | —       | Headless verification harness for the engine.                                                                                                                                                                     |
 
 `matrix-js-sdk@41.6.0` and `marked@14` are pulled via `npm:` and bundled by
 `deno desktop`.
