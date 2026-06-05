@@ -14,12 +14,12 @@ plus the desktop-native chrome that `deno desktop` exposes: a **tray icon**, a
 The **Matrix SDK runs in the Deno process** (not the webview). The webview is a
 thin renderer that calls bindings and listens to a live event stream:
 
-| Side | File | Responsibility |
-| ---- | ---- | -------------- |
-| Deno process | `matrix.ts` | `MatrixEngine`: all `matrix-js-sdk` logic (login, sync, rooms, timeline, send). Framework-agnostic — no webview references — so it's unit-testable headlessly. |
-| Deno process | `main.ts` | Serve the UI + an SSE stream over `Deno.serve`, open the `Deno.BrowserWindow`, expose the engine as `bind()` handlers, forward engine events to the UI, own the tray / dock badge / window lifecycle. |
-| Webview (Chromium) | `app.js` | **No SDK.** Calls bindings, subscribes to the SSE stream, and renders. (Notifications are fired on the Deno side.) |
-| UI | `index.html`, `styles.css` | Static shell served by `main.ts`. |
+| Side               | File                       | Responsibility                                                                                                                                                                                        |
+|--------------------|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Deno process       | `matrix.ts`                | `MatrixEngine`: all `matrix-js-sdk` logic (login, sync, rooms, timeline, send). Framework-agnostic — no webview references — so it's unit-testable headlessly.                                        |
+| Deno process       | `main.ts`                  | Serve the UI + an SSE stream over `Deno.serve`, open the `Deno.BrowserWindow`, expose the engine as `bind()` handlers, forward engine events to the UI, own the tray / dock badge / window lifecycle. |
+| Webview (Chromium) | `app.js`                   | **No SDK.** Calls bindings, subscribes to the SSE stream, and renders. (Notifications are fired on the Deno side.)                                                                                    |
+| UI                 | `index.html`, `styles.css` | Static shell served by `main.ts`.                                                                                                                                                                     |
 
 `matrix-js-sdk` is pinned to **41.6.0** via `npm:matrix-js-sdk@41.6.0`, imported
 in `matrix.ts` and bundled into the app by `deno desktop`.
