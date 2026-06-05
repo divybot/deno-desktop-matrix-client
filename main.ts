@@ -109,6 +109,33 @@ function updateBadge() {
   );
 }
 
+// ── Session persistence (Deno side) ──────────────────────────────────────────
+// Stored on disk by the Deno process so it survives relaunches (the webview's
+// localStorage is ephemeral here) and the access token never reaches the webview.
+const SESSION_FILE = (Deno.env.get("HOME") || Deno.env.get("USERPROFILE") || ".") +
+  "/.matrix-client-demo.json";
+
+function readSession(): Session | null {
+  try {
+    const s = JSON.parse(Deno.readTextFileSync(SESSION_FILE));
+    return s?.accessToken && s?.userId ? s : null;
+  } catch {
+    return null;
+  }
+}
+function writeSession(s: Session) {
+  try {
+    Deno.writeTextFileSync(SESSION_FILE, JSON.stringify(s), { mode: 0o600 });
+  } catch (e) {
+    console.error("could not persist session:", e);
+  }
+}
+function deleteSession() {
+  try {
+    Deno.removeSync(SESSION_FILE);
+  } catch { /* ignore */ }
+}
+
 // ── Bindings the webview calls ───────────────────────────────────────────────
 win.bind("login", async (opts) => {
   const o = (opts ?? {}) as Record<string, string>;
@@ -117,21 +144,26 @@ win.bind("login", async (opts) => {
       ? await engine.loginToken(o.homeserver, o.token)
       : await engine.loginPassword(o.homeserver, o.username, o.password);
     await engine.start(session);
+    writeSession(session);
     updateBadge();
     ensureNotifPermission();
-    return { ok: true, session, userId: session.userId };
+    return { ok: true, userId: session.userId };
   } catch (e) {
     return { ok: false, error: humanError(e) };
   }
 });
 
-win.bind("restore", async (session) => {
+// Called on startup: resume a persisted session, if any.
+win.bind("autoStart", async () => {
+  const session = readSession();
+  if (!session) return { ok: false };
   try {
-    await engine.start(session as unknown as Session);
+    await engine.start(session);
     updateBadge();
     ensureNotifPermission();
     return { ok: true, userId: engine.userId() };
   } catch (e) {
+    deleteSession(); // token invalid/expired → forget it
     return { ok: false, error: humanError(e) };
   }
 });
@@ -163,6 +195,7 @@ win.bind("markRead", async (roomId) => {
 
 win.bind("logout", async () => {
   await engine.logout();
+  deleteSession();
   activeRoomId = null;
   updateBadge();
   return true;

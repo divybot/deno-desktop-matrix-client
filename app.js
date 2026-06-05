@@ -11,7 +11,6 @@
 // relaunch skips re-login.
 
 const $ = (id) => document.getElementById(id);
-const SESSION_KEY = "matrix-client.session.v1";
 
 // ── Binding bridge (waits for injection) ────────────────────────────────────
 async function call(name, ...args) {
@@ -51,22 +50,16 @@ init().catch((e) => showLoginError(e));
 async function init() {
   wireLoginForm();
   connectEvents();
-  const saved = loadSession();
-  if (saved) {
-    log("Restoring session for", saved.userId);
-    try {
-      const r = await call("restore", saved);
-      if (r?.ok) {
-        myUserId = r.userId || saved.userId;
-        await enterApp();
-        return;
-      }
-      log("restore failed:", r?.error);
-      clearSession();
-    } catch (e) {
-      log("restore threw:", String(e));
-      clearSession();
+  try {
+    const r = await call("autoStart"); // resumes a session persisted on the Deno side
+    if (r?.ok) {
+      myUserId = r.userId;
+      await enterApp();
+      return;
     }
+    if (r?.error) log("autoStart:", r.error);
+  } catch (e) {
+    log("autoStart threw:", String(e));
   }
   showScreen("login");
 }
@@ -89,7 +82,6 @@ function wireLoginForm() {
       const r = await call("login", opts);
       if (!r?.ok) throw new Error(r?.error || "Login failed.");
       myUserId = r.userId;
-      saveSession(r.session);
       await enterApp();
     } catch (e) {
       showLoginError(e);
@@ -302,9 +294,17 @@ function renderMsg(msg, continuation) {
 function avatarFor(name, url) {
   const el = document.createElement("div");
   el.className = "avatar";
-  el.textContent = (name || "?").replace(/^[@#!]/, "").trim().charAt(0).toUpperCase() || "?";
   el.style.background = colorFor(name);
-  if (url) el.style.backgroundImage = `url("${url}")`; // covers the initial if it loads
+  const span = document.createElement("span");
+  span.textContent = (name || "?").replace(/^[@#!]/, "").trim().charAt(0).toUpperCase() || "?";
+  el.appendChild(span);
+  if (url) {
+    const img = document.createElement("img"); // overlays the initial; clipped to the circle
+    img.alt = "";
+    img.onerror = () => img.remove(); // broken / unauthorized media → show the initial
+    img.src = url;
+    el.appendChild(img);
+  }
   return el;
 }
 
@@ -353,23 +353,9 @@ function flashError(msg) {
   setTimeout(() => { $("me-status").textContent = "online"; }, 4000);
 }
 
-// ── Session persistence (in the webview) ────────────────────────────────────
-function saveSession(s) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* ignore */ }
-}
-function loadSession() {
-  try {
-    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-    return s && s.accessToken && s.userId ? s : null;
-  } catch { return null; }
-}
-function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
-}
-
+// Session is persisted on the Deno side (see main.ts); logout clears it there.
 $("logout-btn").addEventListener("click", async () => {
   await call("logout").catch(() => {});
-  clearSession();
   currentRoomId = null;
   location.reload();
 });

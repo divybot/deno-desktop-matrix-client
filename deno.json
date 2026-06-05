@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "exports": "./main.ts",
   "tasks": {
-    "dev": "deno desktop --hmr --allow-net --allow-read --allow-env main.ts",
-    "start": "deno desktop --allow-net --allow-read --allow-env main.ts",
-    "bundle": "deno desktop --output MatrixClient --icon icon.png --allow-net --allow-read --allow-env main.ts"
+    "dev": "deno desktop --hmr --allow-net --allow-read --allow-write --allow-env main.ts",
+    "start": "deno desktop --allow-net --allow-read --allow-write --allow-env main.ts",
+    "bundle": "deno desktop --output MatrixClient --icon icon.png --allow-net --allow-read --allow-write --allow-env main.ts"
   },
   "desktop": {
     "app": {

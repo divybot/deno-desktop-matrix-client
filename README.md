@@ -18,16 +18,16 @@ thin renderer that calls bindings and listens to a live event stream:
 | ---- | ---- | -------------- |
 | Deno process | `matrix.ts` | `MatrixEngine`: all `matrix-js-sdk` logic (login, sync, rooms, timeline, send). Framework-agnostic — no webview references — so it's unit-testable headlessly. |
 | Deno process | `main.ts` | Serve the UI + an SSE stream over `Deno.serve`, open the `Deno.BrowserWindow`, expose the engine as `bind()` handlers, forward engine events to the UI, own the tray / dock badge / window lifecycle. |
-| Webview (Chromium) | `app.js` | **No SDK.** Calls bindings, subscribes to the SSE stream, renders, and fires web `Notification`s. |
+| Webview (Chromium) | `app.js` | **No SDK.** Calls bindings, subscribes to the SSE stream, and renders. (Notifications are fired on the Deno side.) |
 | UI | `index.html`, `styles.css` | Static shell served by `main.ts`. |
 
 `matrix-js-sdk` is pinned to **41.6.0** via `npm:matrix-js-sdk@41.6.0`, imported
 in `matrix.ts` and bundled into the app by `deno desktop`.
 
 **Webview → Deno** (bindings exposed via `win.bind(name, fn)`):
-`login`, `restore`, `getRooms`, `selectRoom`, `sendMessage`, `markRead`,
-`logout`, `setActiveRoom` (so notifications are suppressed for the open room),
-and `log` (prints webview logs in the Deno terminal).
+`login`, `autoStart` (resume a persisted session), `getRooms`, `selectRoom`,
+`sendMessage`, `markRead`, `logout`, `setActiveRoom` (so notifications are
+suppressed for the open room), and `log` (prints webview logs in the Deno terminal).
 
 **Deno → Webview** (Server-Sent Events on `GET /events`): the engine pushes
 `{kind:"sync"|"rooms"|"timeline", …}` messages as Matrix events arrive, so the
@@ -41,8 +41,10 @@ message in a room that isn't focused/open (tracking window focus via the
 window's `focus`/`blur` events and the open room via `setActiveRoom`); clicking
 it shows/focuses the window and opens that room.
 
-Session (homeserver + access token) is persisted in the webview's
-`localStorage`; on relaunch `app.js` calls `restore(session)` to skip login.
+Session (homeserver + access token + device id) is persisted **on disk by the
+Deno process** (`~/.matrix-client-demo.json`, mode `0600`) — the webview's
+`localStorage` is ephemeral here, and this keeps the token out of the webview.
+On relaunch `app.js` calls `autoStart`, which resumes the saved session.
 
 ## Prerequisites
 
@@ -89,10 +91,10 @@ From this directory (`matrix-client/`):
 
 ```bash
 # Dev, with hot reload (reloads the window on save):
-deno desktop --hmr --allow-net --allow-read --allow-env main.ts
+deno desktop --hmr --allow-net --allow-read --allow-write --allow-env main.ts
 
 # Plain run:
-deno desktop --allow-net --allow-read --allow-env main.ts
+deno desktop --allow-net --allow-read --allow-write --allow-env main.ts
 ```
 
 Or via the `deno.json` tasks: `deno task dev` / `deno task start`.
@@ -104,7 +106,7 @@ Or via the `deno.json` tasks: `deno task dev` / `deno task start`.
 
 ```bash
 deno desktop --output MatrixClient --icon icon.png \
-  --allow-net --allow-read --allow-env main.ts
+  --allow-net --allow-read --allow-write --allow-env main.ts
 ```
 
 This produces a platform bundle (`.app` on macOS, an app dir / `.AppImage` on
@@ -122,7 +124,7 @@ Linux, a dir / `.exe` on Windows).
 1. **Login** — the homeserver defaults to `https://matrix.org`. Enter a username
    (local part like `alice` or the full `@alice:matrix.org`) and password, or
    expand *“sign in with an access token”* and paste an access token. The
-   session is persisted to `localStorage`, so a relaunch skips re-login.
+   session is persisted on disk by the Deno process, so a relaunch skips re-login.
 2. **Room list** — joined rooms appear in the sidebar with avatars and an unread
    badge; click one to open it.
 3. **Timeline** — recent history loads and updates live as events arrive.
@@ -134,8 +136,8 @@ Linux, a dir / `.exe` on Windows).
   icon shows/focuses the window. Closing the window hides it to the tray — use
   the tray’s **Quit** to exit.
 - **Unread badge** — the total unread count is pushed to `Deno.dock.setBadge()`.
-- **Notifications** — a native notification fires for a new message in a room
-  that isn’t currently focused; clicking it focuses the window and opens that room.
+- **Notifications** — fired from the Deno process for a new message in a room
+  that isn’t focused/open; clicking it focuses the window and opens that room.
 
 ## Verifying the Matrix logic headlessly
 
@@ -165,5 +167,5 @@ means all checks passed.
 ## Security
 
 No credentials are committed. The access token / user id / device id are stored
-only in the webview’s `localStorage` on your machine. *Sign out* (the ⏻ button)
-calls `/logout` and clears it.
+only on your machine, in `~/.matrix-client-demo.json` (mode `0600`), written by
+the Deno process. *Sign out* (the ⏻ button) calls `/logout` and deletes the file.
