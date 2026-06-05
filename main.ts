@@ -143,7 +143,8 @@ win.bind("login", async (opts) => {
     const session: Session = o.token
       ? await engine.loginToken(o.homeserver, o.token)
       : await engine.loginPassword(o.homeserver, o.username, o.password);
-    await engine.start(session);
+    // Don't block the UI on the (possibly slow) initial sync — rooms stream in.
+    await engine.start(session, { waitForPrepared: false });
     writeSession(session);
     updateBadge();
     ensureNotifPermission();
@@ -158,7 +159,7 @@ win.bind("autoStart", async () => {
   const session = readSession();
   if (!session) return { ok: false };
   try {
-    await engine.start(session);
+    await engine.start(session, { waitForPrepared: false });
     updateBadge();
     ensureNotifPermission();
     return { ok: true, userId: engine.userId() };

@@ -87,7 +87,10 @@ export class MatrixEngine {
   }
 
   // ── Start syncing ───────────────────────────────────────────────────────────
-  async start(session: Session): Promise<void> {
+  // By default returns once the initial sync completes (handy for tests). Pass
+  // { waitForPrepared: false } to return as soon as the sync loop starts, so the
+  // UI isn't blocked on a slow initial sync — rooms stream in via onEvent.
+  async start(session: Session, opts: { waitForPrepared?: boolean } = {}): Promise<void> {
     this.baseUrl = session.baseUrl;
     this.client = sdk.createClient({
       baseUrl: session.baseUrl,
@@ -119,7 +122,7 @@ export class MatrixEngine {
     c.on("Room.receipt", () => this.emitRoomsDebounced());
 
     await c.startClient({ initialSyncLimit: 30 });
-    await this.waitPrepared(45000);
+    if (opts.waitForPrepared !== false) await this.waitPrepared(45000);
   }
 
   private waitPrepared(timeoutMs: number): Promise<void> {

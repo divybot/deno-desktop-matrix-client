@@ -95,8 +95,8 @@ function wireLoginForm() {
 async function enterApp() {
   showScreen("app");
   renderMe(myUserId);
-  $("me-status").textContent = "online";
-  rooms = await call("getRooms");
+  $("me-status").textContent = "syncing…"; // 'sync' SSE events flip this to "online"
+  rooms = await call("getRooms"); // may be empty until the first sync; 'rooms' fills it in
   renderRoomList();
 }
 
