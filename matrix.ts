@@ -7,6 +7,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import * as sdk from "npm:matrix-js-sdk@41.6.0";
+import { marked } from "npm:marked@14";
 
 export interface Session {
   baseUrl: string;
@@ -30,6 +31,9 @@ export interface TimelineMsg {
   senderName: string;
   avatarUrl: string | null;
   body: string;
+  /** Matrix `formatted_body` HTML (org.matrix.custom.html), if any. Sanitized
+   * in the webview before rendering. */
+  html: string | null;
   ts: number;
   type: string;
   msgtype: string;
@@ -228,7 +232,11 @@ export class MatrixEngine {
     if (this.isEncrypted(room) && !this.cryptoEnabled) {
       throw new Error("Encryption isn't available this session; can't send to this room.");
     }
-    await this.client.sendTextMessage(roomId, body); // SDK encrypts automatically when needed
+    // Render the composer's markdown to HTML; only attach a formatted_body when
+    // it actually produces formatting (otherwise send a plain text message).
+    const html = markdownToHtml(body);
+    if (html) await this.client.sendHtmlMessage(roomId, body, html);
+    else await this.client.sendTextMessage(roomId, body); // SDK encrypts when needed
   }
 
   markRead(roomId: string): void {
@@ -304,6 +312,7 @@ export class MatrixEngine {
       senderName: this.memberName(room, sender),
       avatarUrl: this.memberAvatar(room, sender),
       body: messageText(event, this.cryptoEnabled),
+      html: formattedHtml(event),
       ts: event.getTs(),
       type: event.getType(),
       msgtype: event.getContent()?.msgtype || "m.text",
@@ -395,6 +404,30 @@ function unreadCount(room: any): number {
   } catch {
     return 0;
   }
+}
+
+// The HTML formatted_body of a message event, if it carries one.
+function formattedHtml(event: any): string | null {
+  if (event.getType() !== "m.room.message") return null;
+  const c = event.getContent() || {};
+  if (c.format === "org.matrix.custom.html" && typeof c.formatted_body === "string") {
+    return c.formatted_body;
+  }
+  return null;
+}
+
+// Markdown → HTML for outgoing messages. Returns null when there's no actual
+// formatting (so we can send a plain text message instead).
+function markdownToHtml(body: string): string | null {
+  let html: string;
+  try {
+    html = (marked.parse(body, { gfm: true, breaks: true }) as string).trim();
+  } catch {
+    return null;
+  }
+  // Anything beyond a plain paragraph / line breaks counts as formatting.
+  if (!/<(?!\/?(?:p|br)\b)[a-z][\s\S]*?>/i.test(html)) return null;
+  return html;
 }
 
 function messageText(event: any, cryptoEnabled: boolean): string {

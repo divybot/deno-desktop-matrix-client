@@ -175,9 +175,9 @@ function applyDecrypted(e) {
     if (n.dataset.eventId !== e.msg.eventId) continue;
     const textEl = n.querySelector(".msg-text");
     if (textEl) {
-      textEl.textContent = e.msg.body;
       textEl.className = "msg-text" +
         (e.msg.msgtype === "m.notice" ? " notice" : e.msg.msgtype === "m.emote" ? " emote" : "");
+      setMessageContent(textEl, e.msg);
     }
     break;
   }
@@ -324,10 +324,68 @@ function renderMsg(msg, continuation) {
   const encrypted = msg.type === "m.room.encrypted";
   text.className = "msg-text" +
     (encrypted ? " encrypted" : msg.msgtype === "m.notice" ? " notice" : msg.msgtype === "m.emote" ? " emote" : "");
-  text.textContent = msg.body;
+  setMessageContent(text, msg);
   body.appendChild(text);
   wrap.appendChild(body);
   return wrap;
+}
+
+// Render a message body: sanitized HTML (formatted_body) when present, else
+// plain text. Never inserts remote HTML without sanitizing.
+function setMessageContent(el, msg) {
+  el.textContent = "";
+  if (msg.type !== "m.room.encrypted" && msg.html) {
+    el.classList.add("rich");
+    el.appendChild(sanitizeHtml(msg.html));
+  } else {
+    el.appendChild(document.createTextNode(msg.body));
+  }
+}
+
+// Allowlist sanitizer: rebuild the Matrix HTML subset into a clean fragment,
+// dropping unknown tags/attributes, scripts, and unsafe URLs.
+const ALLOWED_TAGS = {
+  a: ["href", "title"], b: [], strong: [], i: [], em: [], u: [], s: [], del: [], strike: [],
+  code: ["class"], pre: [], blockquote: [], br: [], p: [], span: [],
+  ul: [], ol: ["start"], li: [], h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], hr: [],
+};
+function sanitizeHtml(html) {
+  const doc = new DOMParser().parseFromString(String(html), "text/html");
+  const frag = document.createDocumentFragment();
+  sanitizeInto(doc.body, frag);
+  return frag;
+}
+function sanitizeInto(src, dst) {
+  for (const node of src.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      dst.appendChild(document.createTextNode(node.nodeValue));
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = node.tagName.toLowerCase();
+    const allowed = ALLOWED_TAGS[tag];
+    if (!allowed) { // unknown tag → drop the tag but keep its (sanitized) contents
+      sanitizeInto(node, dst);
+      continue;
+    }
+    const el = document.createElement(tag);
+    for (const attr of allowed) {
+      const v = node.getAttribute(attr);
+      if (v == null) continue;
+      if (tag === "a" && attr === "href") {
+        if (!/^(https?:|mailto:|matrix:|#)/i.test(v)) continue;
+        el.setAttribute("href", v);
+        el.title = v;
+      } else if (attr === "class") {
+        if (/^language-[\w-]+$/.test(v)) el.setAttribute("class", v);
+      } else {
+        el.setAttribute(attr, v);
+      }
+    }
+    if (tag === "a") el.addEventListener("click", (e) => e.preventDefault()); // don't navigate the app away
+    sanitizeInto(node, el);
+    dst.appendChild(el);
+  }
 }
 
 function avatarFor(name, url) {

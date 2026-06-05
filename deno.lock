@@ -2,6 +2,7 @@
   "version": "5",
   "specifiers": {
     "npm:@matrix-org/matrix-sdk-crypto-wasm@18.3.1": "18.3.1",
+    "npm:marked@14": "14.1.4",
     "npm:matrix-js-sdk@41.6.0": "41.6.0"
   },
   "npm": {
@@ -40,6 +41,10 @@
     },
     "loglevel@1.9.2": {
       "integrity": "sha512-HgMmCqIJSAKqo68l0rS2AanEWfkxaZ5wNiEFb5ggm08lDs9Xl2KxBlX3PTcaD2chBM1gXAYf491/M2Rv8Jwayg=="
+    },
+    "marked@14.1.4": {
+      "integrity": "sha512-vkVZ8ONmUdPnjCKc5uTRvmkRbx4EAi2OkTOXmfTDhZz3OFqMNBM1oTTWwTr4HY4uAEojhzPf+Fy8F1DWa3Sndg==",
+      "bin": true
     },
     "matrix-events-sdk@0.0.1": {
       "integrity": "sha512-1QEOsXO+bhyCroIe2/A5OwaxHvBm7EsSQ46DEDn8RBIfQwN5HWBpFvyWWR4QY0KHPPnnJdI99wgRiAl7Ad5qaA=="

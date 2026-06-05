@@ -129,6 +129,13 @@ Linux, a dir / `.exe` on Windows).
    badge; click one to open it.
 3. **Timeline** — recent history loads and updates live as events arrive.
 4. **Send** — type in the composer and press **Enter** (Shift+Enter for a newline).
+   **Markdown** is supported: it's rendered to HTML on send (`marked`) and sent
+   as a Matrix `formatted_body`, so `**bold**`, `*italic*`, `` `code` ``, lists,
+   quotes, and links show formatted here and in other clients.
+
+Incoming messages with an HTML `formatted_body` are rendered too — through an
+allowlist sanitizer (the Matrix HTML subset only; scripts/unknown tags/unsafe
+URLs are stripped, and links don't navigate the app away).
 
 ### Desktop features
 
