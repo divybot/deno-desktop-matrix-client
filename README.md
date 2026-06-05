@@ -3,229 +3,168 @@
 A small native desktop **Matrix chat client**: a Chromium webview UI driven by a
 Deno process, using the official [`matrix-js-sdk`](https://github.com/matrix-org/matrix-js-sdk).
 
-It demonstrates the core chat flow (login → room list → live timeline → send)
-plus the desktop-native chrome that `deno desktop` exposes: a **tray icon**, a
-**dock/taskbar unread badge**, and native **notifications**.
-
-![layout: sidebar room list + timeline + composer]
+Login → room list → live timeline → send, with markdown, end-to-end encryption,
+and the desktop-native chrome `deno desktop` exposes: a **tray** with a
+click-to-open menu, a **dock/taskbar unread badge**, a **native menu bar**, and
+native **notifications**.
 
 ## Architecture
 
-The **Matrix SDK runs in the Deno process** (not the webview). The webview is a
-thin renderer that calls bindings and listens to a live event stream:
+The **Matrix SDK runs in the Deno process**, not the webview. The webview is a
+thin renderer that calls bindings and listens to a live event stream.
 
-| Side               | File                       | Responsibility                                                                                                                                                                                        |
-|--------------------|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Deno process       | `matrix.ts`                | `MatrixEngine`: all `matrix-js-sdk` logic (login, sync, rooms, timeline, send). Framework-agnostic — no webview references — so it's unit-testable headlessly.                                        |
-| Deno process       | `main.ts`                  | Serve the UI + an SSE stream over `Deno.serve`, open the `Deno.BrowserWindow`, expose the engine as `bind()` handlers, forward engine events to the UI, own the tray / dock badge / window lifecycle. |
-| Webview (Chromium) | `app.js`                   | **No SDK.** Calls bindings, subscribes to the SSE stream, and renders. (Notifications are fired on the Deno side.)                                                                                    |
-| UI                 | `index.html`, `styles.css` | Static shell served by `main.ts`.                                                                                                                                                                     |
+| File | Side | Responsibility |
+| ---- | ---- | -------------- |
+| `matrix.ts` | Deno | `MatrixEngine` — all `matrix-js-sdk` logic (login, sync, rooms, timeline, send, crypto, markdown). Framework-agnostic, so it's unit-testable headlessly. |
+| `main.ts` | Deno | Serves the UI + an SSE stream (`Deno.serve`), opens the `Deno.BrowserWindow`, exposes the engine as `bind()` handlers, and owns the desktop chrome (tray, dock badge, menu bar, notifications, window lifecycle). |
+| `app.js` | Webview | No SDK. Calls bindings, subscribes to SSE, renders the UI. |
+| `index.html`, `styles.css` | Webview | Static shell, embedded into the binary via `import … with { type: "text" }`. |
+| `icon.png` | — | App icon (build-time). The tray icon is generated in code. |
+| `test_matrix.ts` | — | Headless verification harness for the engine. |
 
-`matrix-js-sdk` is pinned to **41.6.0** via `npm:matrix-js-sdk@41.6.0`, imported
-in `matrix.ts` and bundled into the app by `deno desktop`.
+`matrix-js-sdk@41.6.0` and `marked@14` are pulled via `npm:` and bundled by
+`deno desktop`.
 
-**Webview → Deno** (bindings exposed via `win.bind(name, fn)`):
-`login`, `autoStart` (resume a persisted session), `getRooms`, `selectRoom`,
-`sendMessage`, `markRead`, `logout`, `setActiveRoom` (so notifications are
-suppressed for the open room), and `log` (prints webview logs in the Deno terminal).
+**Webview → Deno** (`win.bind`): `login`, `autoStart`, `getRooms`, `selectRoom`,
+`sendMessage`, `markRead`, `setActiveRoom`, `logout`, `log` — plus the tray
+panel's `trayData` / `trayOpen` / `trayMarkAll` / `trayNewDm` / `trayShow` /
+`trayQuit`.
 
-**Deno → Webview** (Server-Sent Events on `GET /events`): the engine pushes
-`{kind:"sync"|"rooms"|"timeline", …}` messages as Matrix events arrive, so the
-sidebar and open timeline update live, plus `{kind:"openRoom"}` when a
-notification is clicked.
-
-Everything desktop-native lives on the Deno side: the dock unread badge
-(`Deno.dock.setBadge`, computed from the engine's unread totals), the tray, and
-**native notifications** — `main.ts` fires a `Notification` for an incoming
-message in a room that isn't focused/open (tracking window focus via the
-window's `focus`/`blur` events and the open room via `setActiveRoom`); clicking
-it shows/focuses the window and opens that room.
-
-Session (homeserver + access token + device id) is persisted **on disk by the
-Deno process** (`~/.matrix-client-demo.json`, mode `0600`) — the webview's
-`localStorage` is ephemeral here, and this keeps the token out of the webview.
-On relaunch `app.js` calls `autoStart`, which resumes the saved session.
+**Deno → Webview** (Server-Sent Events on `GET /events`): `sync`, `rooms`,
+`timeline`, `decrypted`, `openRoom`, `nav`, `loggedOut`. There's also a
+`GET /media?mxc=…` route that proxies authenticated avatar thumbnails.
 
 ## Prerequisites
 
-This app requires the **`deno desktop`** binary, which only exists on the
-in-development branch `desktop-framework-hmr` of `https://github.com/crowlkats/deno`.
-It is **not** in any released Deno. Build it from source:
+This app needs the **`deno desktop`** binary, which only exists on the
+in-development branch `desktop-framework-hmr` of `crowlkats/deno` — it is **not**
+in any released Deno. Build it from source:
 
 ```bash
 git clone --recurse-submodules --branch desktop-framework-hmr \
   https://github.com/crowlkats/deno.git deno-desktop
 cd deno-desktop
-# Also needed: a sibling `libsui` checkout (path dep `../sui`, version 0.13.0):
-#   git clone https://github.com/denoland/sui ../sui   (check out the 0.13.0 commit)
-cargo build --bin deno          # debug build is fine
+# Sibling path dependency: libsui (`../sui`), pinned to 0.13.0:
+git clone https://github.com/denoland/sui ../sui   # check out the 0.13.0-era commit
+cargo build --bin deno                              # debug build is fine
 export PATH="$PWD/target/debug:$PATH"
-deno desktop --help             # verify the subcommand exists
+deno desktop --help
 ```
 
-Build prerequisites: Rust stable toolchain, a C/C++ compiler, `cmake`, and
-`protoc`. The first `deno desktop` run downloads a prebuilt **WEF** UI backend
-archive (checksum-verified) — it needs network access the first time.
+Build prerequisites: Rust stable, a C/C++ compiler, `cmake`, and `protoc`. The
+first `deno desktop` run downloads a prebuilt **WEF** UI backend (checksum-verified;
+needs network the first time).
 
-> **Building `deno desktop` from source needs `libdenort`.** `deno desktop`
-> assembles your app into a `.so` that is appended to a `libdenort.{so,dylib,dll}`
-> base (the embedded Deno runtime). A released `deno` downloads a matching
-> prebuilt `libdenort` from `dl.deno.land`; a *from-source* build has no
-> published artifact for its dev version, so build it yourself and point
-> `deno desktop` at it:
->
-> ```bash
-> cargo build -p denort_desktop          # produces target/<profile>/libdenort.so
-> # deno desktop finds it next to the deno binary, or set DENORT_DESKTOP_BIN=/path/to/libdenort.so
-> ```
->
-> On Linux this cdylib link requires a `rusty_v8` built with
-> `-DV8_TLS_USED_IN_LIBRARY` (shared-library-safe TLS). If the prebuilt v8
-> archive for the pinned version lacks it, the link fails with
-> `relocation R_X86_64_TPOFF32 ... cannot be used with -shared`; in that case
-> build v8 from source (`V8_FROM_SOURCE=1`, heavy).
+> A from-source `deno` also needs `libdenort` (the runtime base the app `.so` is
+> appended to). There's no published artifact for a dev version, so build it
+> yourself: `cargo build -p denort_desktop` (produces `libdenort.{so,dylib}` next
+> to the `deno` binary, or point `DENORT_DESKTOP_BIN` at it).
 
 ## Run
 
-From this directory (`matrix-client/`):
+From this directory:
 
 ```bash
-# Dev, with hot reload (reloads the window on save):
-deno desktop --hmr --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
-
-# Plain run:
-deno desktop --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
+deno task dev
 ```
 
-Or via the `deno.json` tasks: `deno task dev` / `deno task start`.
-
-> On a headless Linux box the webview needs a display. Run it under a virtual
-> framebuffer, e.g. `xvfb-run -s "-screen 0 1280x900x24" deno desktop … main.ts`.
-
-### Build a distributable bundle
+which runs, with hot reload:
 
 ```bash
-deno desktop --output MatrixClient --icon icon.png \
-  --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
+deno desktop --hmr --conditions=matrix-org:wasm-esm \
+  --allow-net --allow-read --allow-write --allow-env main.ts
 ```
 
-This produces a platform bundle (`.app` on macOS, an app dir / `.AppImage` on
-Linux, a dir / `.exe` on Windows).
+Drop `--hmr` for a plain run. `--conditions=matrix-org:wasm-esm` selects the
+crypto library's ESM-wasm loader (see [Encryption](#encryption)). On a headless
+box the webview needs a display — run under `xvfb-run`.
 
-> `deno desktop` compiles the entry into a self-contained binary, so the UI
-> assets (`index.html`, `app.js`, `styles.css`) are **embedded** into the module
-> graph via `import … with { type: "text" }` in `main.ts` — they're served from
-> memory at runtime (and still hot-reload from disk under `--hmr`). The tray
-> icon is generated in-code; `icon.png` is only used at build time for the app
-> icon (`--icon` / `desktop.app.icons`).
+### Build a distributable
+
+```bash
+deno task bundle   # → MatrixClient.app / .AppImage / dir, per platform
+```
+
+The UI assets are embedded into the binary, so the bundle is self-contained.
 
 ## Using it
 
-1. **Login** — the homeserver defaults to `https://matrix.org`. Enter a username
-   (local part like `alice` or the full `@alice:matrix.org`) and password, or
-   expand *“sign in with an access token”* and paste an access token. The
-   session is persisted on disk by the Deno process, so a relaunch skips re-login.
-2. **Room list** — joined rooms appear in the sidebar with avatars and an unread
-   badge; click one to open it.
-3. **Timeline** — recent history loads and updates live as events arrive.
-4. **Send** — type in the composer and press **Enter** (Shift+Enter for a newline).
-   **Markdown** is supported: it's rendered to HTML on send (`marked`) and sent
-   as a Matrix `formatted_body`, so `**bold**`, `*italic*`, `` `code` ``, lists,
-   quotes, and links show formatted here and in other clients.
-
-Incoming messages with an HTML `formatted_body` are rendered too — through an
-allowlist sanitizer (the Matrix HTML subset only; scripts/unknown tags/unsafe
-URLs are stripped, and links don't navigate the app away).
+1. **Login** — homeserver defaults to `https://matrix.org`. Enter a username
+   (`alice` or `@alice:matrix.org`) and password, or expand *"sign in with an
+   access token"*. The session is persisted on disk by the Deno process, so a
+   relaunch skips re-login.
+2. **Rooms** — joined rooms appear in the sidebar with avatars and unread badges.
+3. **Timeline** — recent history loads and updates live.
+4. **Send** — **Enter** sends (Shift+Enter for a newline). **Markdown** is
+   rendered to a Matrix `formatted_body` on send, and incoming `formatted_body`
+   HTML is rendered through an allowlist sanitizer (the Matrix HTML subset only;
+   scripts/unknown tags/unsafe URLs stripped, links don't navigate the app away).
 
 ### Desktop features
 
-- **Tray icon — quick access to unread chats.** A speech-bubble status-bar icon
-  (a macOS template image, so it adapts to light/dark). **Left-click opens a
-  popover "menu"** (a frameless `Tray.attachPanel` window) that shows the total
-  unread count, lists your **unread rooms** (click one to open it), and offers
-  **Mark All as Read**, **New Direct Message…**, **Show Window**, and **Quit** —
-  it re-renders live off the same `/events` SSE stream. The **right-click**
-  native menu (`Tray.setMenu`) offers the same actions. Closing the window hides
-  it to the tray.
+- **Tray** — a speech-bubble status-bar icon (a macOS template image).
+  **Left-click** opens a popover menu (`Tray.attachPanel`) listing your **unread
+  rooms** (click to jump in), plus *Mark All as Read*, *New Direct Message…*,
+  *Show Window*, *Quit*; it re-renders live off the SSE stream. **Right-click**
+  shows the equivalent native menu.
+- **Menu bar** (`win.setApplicationMenu`): *File* (New DM `⌘N`, Sign Out),
+  *Edit* (system cut/copy/paste/select-all for the composer), *View*
+  (Next/Previous Room `⌘]`/`⌘[`, Mark All as Read `⇧⌘A`, Reload, Toggle DevTools),
+  *Help*, and the macOS app menu.
+- **Unread badge** — total unread pushed to `Deno.dock.setBadge()`.
+- **Notifications** — fired from the Deno process for a message in a room that
+  isn't focused/open; clicking one focuses the window and opens that room.
+- **Window close** hides to the tray (use the tray's *Quit* to exit).
 
-  > Why a popover for left-click? `just-wef` reserves **right-click** for the
-  > native tray menu and routes **left-click** to the `click` handler — there's
-  > no API to pop the native menu on left-click — so the click-menu is built with
-  > `attachPanel`, the documented menu-bar-app pattern.
-- **Native menu bar** (`win.setApplicationMenu`), with working actions and
-  accelerators:
-  - **File** — *New Direct Message…* (`⌘N`, prompts for a user id and opens the
-    DM), *Sign Out*.
-  - **Edit** — *Undo / Redo / Cut / Copy / Paste / Select All* (system roles, for
-    the composer).
-  - **View** — *Next / Previous Room* (`⌘]` / `⌘[`), *Mark All as Read*
-    (`⇧⌘A`), *Reload* (`⌘R`), *Toggle Developer Tools*.
-  - **Help** — *Project Repository*. (macOS app menu: *About*, *Hide*, *Quit*.)
+## Encryption
 
-  Menu clicks arrive in `main.ts` as `menuclick` events; actions either run on
-  the engine (mark-all-read, new DM, sign out) or are pushed to the UI over SSE
-  (`nav`, `openRoom`, `loggedOut`).
-- **Unread badge** — the total unread count is pushed to `Deno.dock.setBadge()`.
-- **Notifications** — fired from the Deno process for a new message in a room
-  that isn’t focused/open; clicking it focuses the window and opens that room.
+The engine initializes the Rust crypto stack (`initRustCrypto`, in-memory store
+— Deno has no IndexedDB). When crypto is available, encrypted rooms work:
+incoming messages decrypt (a *"🔒 Decrypting…"* placeholder is replaced in place
+via `Event.decrypted`), and you can send to encrypted rooms (Megolm). Keys live
+for the session, so pre-launch history may show *"🔒 Unable to decrypt"*. No
+device verification / cross-signing.
 
-## Verifying the Matrix logic headlessly
+> **Current limitation in the compiled GUI.** Crypto works under `deno run`
+> (verified by `test_matrix.ts`), but **`deno desktop` drops `--conditions` on
+> its compile path**, so the compiled app loads the crypto library's `node`
+> entry, whose `fs.readFile` of the embedded `.wasm` returns `NotSupported` —
+> encrypted rooms fall back to read-only (*"🔒 Encrypted message"*, composer
+> locked). The `--conditions=matrix-org:wasm-esm` flag is already wired up and
+> will enable E2EE in the GUI with no app change once `deno desktop` threads it
+> into the compile.
 
-The desktop GUI needs a display, but the Matrix integration (login, sync, room
-list, **live send/receive**, history) can be verified headlessly with
-`test_matrix.ts`, which drives the **real `MatrixEngine` from `matrix.ts`** (the
-same code `main.ts` runs) against any homeserver:
+## Verifying headlessly
+
+The Matrix logic can be verified without a display against any homeserver:
 
 ```bash
-# Against a local homeserver (e.g. a dev Synapse with open registration):
-deno run -A test_matrix.ts http://localhost:8008
+deno run --conditions=matrix-org:wasm-esm -A test_matrix.ts http://localhost:8008
 ```
 
-It registers two users, logs in, syncs both to `PREPARED`, checks live
-send/receive in a plain room, **and verifies end-to-end encryption** (creates an
-encrypted room and asserts the other user decrypts the message). Exit code 0
-means all checks passed.
+It registers two users and asserts login, sync, room list, live send/receive
+both ways, and **end-to-end encryption** (encrypted room → the other user
+decrypts). Exit code 0 = all checks passed. (Point it at a dev homeserver with
+open registration, e.g. a local Synapse.)
 
-## Encryption (E2EE)
+## Known `deno desktop` rough edges
 
-The engine initializes the Rust crypto stack (`client.initRustCrypto()`), so
-**encrypted rooms work**: incoming messages are decrypted (rendering a
-*“🔒 Decrypting…”* placeholder that's replaced in place once the clear text
-arrives, via an `Event.decrypted` → SSE `decrypted` update), and you can send to
-encrypted rooms (the SDK encrypts with Megolm automatically). The composer is
-only locked if crypto failed to initialize.
+Hit while building this demo (this branch is in development):
 
-It uses an **in-memory** crypto store (Deno has no IndexedDB), so keys live for
-the session: messages exchanged while running decrypt, but history from *before*
-launch — and rooms whose keys you never received — may show
-*“🔒 Unable to decrypt”* (and if crypto fails to initialize, encrypted messages
-just show *“🔒 Encrypted message”* and their composer is locked). Device
-verification / cross-signing isn't implemented (messages are sent to all of a
-user's devices).
-
-> **Status of E2EE under `deno desktop` (a branch bug).** `@matrix-org/matrix-sdk-crypto-wasm`
-> ships several entrypoints. Under Deno's default `node` condition it loads its
-> `.wasm` via `fs.readFile`, which throws `NotSupported` for files embedded in a
-> compiled app — so crypto falls back to read-only there. The fix is the
-> `matrix-org:wasm-esm` condition, which selects the entry that `import()`s the
-> `.wasm` as an ES module (deno-compile embeds it, no fs read). The `deno.json`
-> tasks pass `--conditions=matrix-org:wasm-esm`, and **`deno run` honors it**
-> (crypto + E2EE verified headlessly via `test_matrix.ts`). But **`deno desktop`
-> currently drops `--conditions` on its compile path**, so the compiled app still
-> resolves the `node` entry and encrypted rooms stay read-only. Once `deno desktop`
-> threads `--conditions` into the compile (it carries the rest of `flags`), E2EE
-> works in the GUI too — no app change needed. Two underlying `deno` issues:
-> (1) `deno compile`/`deno desktop` not applying custom export conditions;
-> (2) node `fs.readFile`/`readFileSync` of embedded files returning `NotSupported`.
-
-## Limitations
-
-- In-memory store (sync + crypto), so each launch performs a fresh initial sync
-  and can't decrypt pre-launch encrypted history.
-- No device verification / cross-signing UI.
+- `deno desktop` (compile) ignores `--conditions`, unlike `deno run` — blocks the
+  E2EE wasm loader above.
+- deno-compile can't read embedded files via Node `fs.readFile`/`readFileSync`
+  (`NotSupported`), breaking npm wasm packages that use the Node loader.
+- `Deno.dock.setBadge(null)` renders a literal `"null"` on macOS — pass `""` to
+  clear.
+- The tray's native menu is right-click only (`just-wef` routes left-click to the
+  `click` handler), so the left-click menu is a popover.
+- A from-source `deno` has no downloadable `libdenort`, and building the
+  `denort_desktop` cdylib needs a `rusty_v8` built with `-DV8_TLS_USED_IN_LIBRARY`
+  (the prebuilt one fails to link into a shared library).
 
 ## Security
 
 No credentials are committed. The access token / user id / device id are stored
 only on your machine, in `~/.matrix-client-demo.json` (mode `0600`), written by
-the Deno process. *Sign out* (the ⏻ button) calls `/logout` and deletes the file.
+the Deno process. *Sign out* calls `/logout` and deletes the file.
