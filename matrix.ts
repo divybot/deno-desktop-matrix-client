@@ -311,26 +311,42 @@ export class MatrixEngine {
     };
   }
 
-  private mxc(url: string | null | undefined): string | null {
-    try {
-      return url ? this.client.mxcUrlToHttp(url, 64, 64, "crop", false) : null;
-    } catch {
-      return null;
-    }
+  // Avatars are served through the local /media proxy (see main.ts), which
+  // fetches with the access token — homeservers now require auth for media, so
+  // a bare <img src=mxc> would 401 and fall back to the placeholder.
+  private mediaPath(mxc: string | null | undefined): string | null {
+    return mxc ? `/media?mxc=${encodeURIComponent(mxc)}&size=64` : null;
   }
   private roomAvatar(room: any): string | null {
     try {
-      return this.mxc(room.getMxcAvatarUrl?.());
+      return this.mediaPath(room.getMxcAvatarUrl?.());
     } catch {
       return null;
     }
   }
   private memberAvatar(room: any, userId: string): string | null {
     try {
-      return this.mxc(room.getMember?.(userId)?.getMxcAvatarUrl?.());
+      return this.mediaPath(room.getMember?.(userId)?.getMxcAvatarUrl?.());
     } catch {
       return null;
     }
+  }
+
+  /** Fetch an authenticated media thumbnail (used by the /media route). */
+  async fetchThumbnail(
+    mxc: string,
+    size: number,
+  ): Promise<{ contentType: string; body: ArrayBuffer } | null> {
+    if (!this.client || !mxc) return null;
+    const url = this.client.mxcUrlToHttp(mxc, size, size, "crop", false, true, true);
+    if (!url) return null;
+    const token = this.client.getAccessToken();
+    const res = await fetch(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+    if (!res.ok) return null;
+    return {
+      contentType: res.headers.get("content-type") || "image/png",
+      body: await res.arrayBuffer(),
+    };
   }
   private memberName(room: any, userId: string): string {
     try {

@@ -537,6 +537,24 @@ const httpServer = Deno.serve((req) => {
   switch (url.pathname) {
     case "/tray":
       return text(TRAY_HTML, "text/html; charset=utf-8");
+    case "/media": {
+      // Authenticated media proxy: the webview can't send the access token, so
+      // the Deno process fetches the thumbnail and serves the bytes.
+      const mxc = url.searchParams.get("mxc");
+      const size = Number(url.searchParams.get("size")) || 64;
+      if (mxc) {
+        return engine.fetchThumbnail(mxc, size)
+          .then((m) =>
+            m
+              ? new Response(m.body, {
+                headers: { "content-type": m.contentType, "cache-control": "max-age=3600" },
+              })
+              : new Response(null, { status: 404 })
+          )
+          .catch(() => new Response(null, { status: 502 }));
+      }
+      return new Response(null, { status: 404 });
+    }
     case "/events": {
       // Server-Sent Events: stream live Matrix events to the webview.
       let ctrl: ReadableStreamDefaultController<Uint8Array>;

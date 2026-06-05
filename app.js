@@ -333,16 +333,21 @@ function renderMsg(msg, continuation) {
 function avatarFor(name, url) {
   const el = document.createElement("div");
   el.className = "avatar";
-  el.style.background = colorFor(name);
-  const span = document.createElement("span");
-  span.textContent = (name || "?").replace(/^[@#!]/, "").trim().charAt(0).toUpperCase() || "?";
-  el.appendChild(span);
+  const placeholder = () => {
+    el.textContent = (name || "?").replace(/^[@#!]/, "").trim().charAt(0).toUpperCase() || "?";
+    el.style.background = colorFor(name);
+  };
   if (url) {
-    const img = document.createElement("img"); // overlays the initial; clipped to the circle
+    // Has an avatar image: show it, no letter placeholder behind it. Only fall
+    // back to the initial if the image actually fails to load.
+    el.style.background = "#2c343f";
+    const img = document.createElement("img");
     img.alt = "";
-    img.onerror = () => img.remove(); // broken / unauthorized media → show the initial
+    img.onerror = () => { img.remove(); placeholder(); };
     img.src = url;
     el.appendChild(img);
+  } else {
+    placeholder();
   }
   return el;
 }

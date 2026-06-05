@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "npm:@matrix-org/matrix-sdk-crypto-wasm@18.3.1": "18.3.1",
     "npm:matrix-js-sdk@41.6.0": "41.6.0"
   },
   "npm": {
