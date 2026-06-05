@@ -109,7 +109,7 @@ function maybeNotify(e: { roomId: string; roomName: string; msg: any }) {
 function updateBadge() {
   const n = engine.totalUnread();
   try {
-    Deno.dock?.setBadge(n > 0 ? String(n) : null);
+    Deno.dock?.setBadge(n > 0 ? String(n) : ""); // "" clears; null can render as "null"
   } catch { /* best-effort */ }
   tray?.setTooltip(
     `Matrix${engine.userId() ? " — " + engine.userId() : ""}${n > 0 ? ` (${n})` : ""}`,
