@@ -196,13 +196,20 @@ just show *“🔒 Encrypted message”* and their composer is locked). Device
 verification / cross-signing isn't implemented (messages are sent to all of a
 user's devices).
 
-> **`--conditions=matrix-org:wasm-esm` is required.** `@matrix-org/matrix-sdk-crypto-wasm`
-> ships several entrypoints. Under Deno's default (`node`) condition it loads its
+> **Status of E2EE under `deno desktop` (a branch bug).** `@matrix-org/matrix-sdk-crypto-wasm`
+> ships several entrypoints. Under Deno's default `node` condition it loads its
 > `.wasm` via `fs.readFile`, which throws `NotSupported` for files embedded in a
-> compiled `deno desktop` app — so crypto silently falls back to read-only. The
-> `matrix-org:wasm-esm` condition selects the entry that `import()`s the `.wasm`
-> as an ES module, which `deno compile` embeds into the binary and loads without
-> a filesystem read. The `deno.json` tasks already pass this flag.
+> compiled app — so crypto falls back to read-only there. The fix is the
+> `matrix-org:wasm-esm` condition, which selects the entry that `import()`s the
+> `.wasm` as an ES module (deno-compile embeds it, no fs read). The `deno.json`
+> tasks pass `--conditions=matrix-org:wasm-esm`, and **`deno run` honors it**
+> (crypto + E2EE verified headlessly via `test_matrix.ts`). But **`deno desktop`
+> currently drops `--conditions` on its compile path**, so the compiled app still
+> resolves the `node` entry and encrypted rooms stay read-only. Once `deno desktop`
+> threads `--conditions` into the compile (it carries the rest of `flags`), E2EE
+> works in the GUI too — no app change needed. Two underlying `deno` issues:
+> (1) `deno compile`/`deno desktop` not applying custom export conditions;
+> (2) node `fs.readFile`/`readFileSync` of embedded files returning `NotSupported`.
 
 ## Limitations
 
