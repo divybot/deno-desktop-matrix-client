@@ -91,10 +91,10 @@ From this directory (`matrix-client/`):
 
 ```bash
 # Dev, with hot reload (reloads the window on save):
-deno desktop --hmr --allow-net --allow-read --allow-write --allow-env main.ts
+deno desktop --hmr --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
 
 # Plain run:
-deno desktop --allow-net --allow-read --allow-write --allow-env main.ts
+deno desktop --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
 ```
 
 Or via the `deno.json` tasks: `deno task dev` / `deno task start`.
@@ -106,7 +106,7 @@ Or via the `deno.json` tasks: `deno task dev` / `deno task start`.
 
 ```bash
 deno desktop --output MatrixClient --icon icon.png \
-  --allow-net --allow-read --allow-write --allow-env main.ts
+  --conditions=matrix-org:wasm-esm --allow-net --allow-read --allow-write --allow-env main.ts
 ```
 
 This produces a platform bundle (`.app` on macOS, an app dir / `.AppImage` on
@@ -183,8 +183,18 @@ only locked if crypto failed to initialize.
 It uses an **in-memory** crypto store (Deno has no IndexedDB), so keys live for
 the session: messages exchanged while running decrypt, but history from *before*
 launch — and rooms whose keys you never received — may show
-*“🔒 Unable to decrypt”*. Device verification / cross-signing isn't implemented
-(messages are sent to all of a user's devices).
+*“🔒 Unable to decrypt”* (and if crypto fails to initialize, encrypted messages
+just show *“🔒 Encrypted message”* and their composer is locked). Device
+verification / cross-signing isn't implemented (messages are sent to all of a
+user's devices).
+
+> **`--conditions=matrix-org:wasm-esm` is required.** `@matrix-org/matrix-sdk-crypto-wasm`
+> ships several entrypoints. Under Deno's default (`node`) condition it loads its
+> `.wasm` via `fs.readFile`, which throws `NotSupported` for files embedded in a
+> compiled `deno desktop` app — so crypto silently falls back to read-only. The
+> `matrix-org:wasm-esm` condition selects the entry that `import()`s the `.wasm`
+> as an ES module, which `deno compile` embeds into the binary and loads without
+> a filesystem read. The `deno.json` tasks already pass this flag.
 
 ## Limitations
 

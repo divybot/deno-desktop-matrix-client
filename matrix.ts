@@ -303,7 +303,7 @@ export class MatrixEngine {
       sender,
       senderName: this.memberName(room, sender),
       avatarUrl: this.memberAvatar(room, sender),
-      body: messageText(event),
+      body: messageText(event, this.cryptoEnabled),
       ts: event.getTs(),
       type: event.getType(),
       msgtype: event.getContent()?.msgtype || "m.text",
@@ -381,9 +381,13 @@ function unreadCount(room: any): number {
   }
 }
 
-function messageText(event: any): string {
+function messageText(event: any, cryptoEnabled: boolean): string {
   if (event.isDecryptionFailure?.()) return "🔒 Unable to decrypt this message";
-  if (event.getType() === "m.room.encrypted") return "🔒 Decrypting…";
+  if (event.getType() === "m.room.encrypted") {
+    // Still ciphertext: pending decryption if crypto is on, otherwise we just
+    // can't read it this session.
+    return cryptoEnabled ? "🔒 Decrypting…" : "🔒 Encrypted message";
+  }
   const c = event.getContent() || {};
   switch (c.msgtype) {
     case "m.emote":
