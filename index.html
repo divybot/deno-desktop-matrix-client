@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Matrix</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login" class="screen">
+    <form id="login-form" class="login-card">
+      <div class="brand">
+        <div class="brand-badge">m</div>
+        <h1>Matrix</h1>
+      </div>
+      <p class="sub">A demo client built with <code>deno desktop</code></p>
+
+      <label>Homeserver
+        <input id="homeserver" type="text" value="https://matrix.org" spellcheck="false" />
+      </label>
+      <label>Username
+        <input id="username" type="text" placeholder="alice (or @alice:matrix.org)" autocomplete="username" spellcheck="false" />
+      </label>
+      <label>Password
+        <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+      </label>
+
+      <details class="token-details">
+        <summary>or sign in with an access token</summary>
+        <label>Access token
+          <input id="token" type="password" placeholder="syt_..." spellcheck="false" />
+        </label>
+      </details>
+
+      <button id="login-btn" type="submit">Sign in</button>
+      <div id="login-error" class="error" hidden></div>
+    </form>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="screen" hidden>
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <div id="me-avatar" class="avatar small"></div>
+        <div class="me-info">
+          <div id="me-name" class="me-name">…</div>
+          <div id="me-status" class="me-status">connecting…</div>
+        </div>
+        <button id="logout-btn" class="icon-btn" title="Sign out">⏻</button>
+      </header>
+      <div id="room-list" class="room-list"></div>
+    </aside>
+
+    <main class="chat">
+      <header id="room-header" class="chat-header">
+        <div id="room-title" class="room-title">Select a room</div>
+        <div id="room-topic" class="room-topic"></div>
+      </header>
+      <div id="timeline" class="timeline">
+        <div class="empty-hint">Pick a room from the left to start chatting.</div>
+      </div>
+      <form id="composer" class="composer" hidden>
+        <textarea id="composer-input" rows="1" placeholder="Send a message…"></textarea>
+        <button id="send-btn" type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

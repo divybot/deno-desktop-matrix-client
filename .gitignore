@@ -1,0 +1,9 @@
+# Build output
+MatrixClient
+MatrixClient.*
+*.app
+*.AppImage
+*.dmg
+# Never commit secrets
+.env
+*.token

@@ -1,0 +1,20 @@
+{
+  "name": "matrix-client",
+  "version": "0.1.0",
+  "exports": "./main.ts",
+  "tasks": {
+    "dev": "deno desktop --hmr --allow-net --allow-read --allow-env main.ts",
+    "start": "deno desktop --allow-net --allow-read --allow-env main.ts",
+    "bundle": "deno desktop --output MatrixClient --icon icon.png --allow-net --allow-read --allow-env main.ts"
+  },
+  "desktop": {
+    "app": {
+      "name": "Matrix Client",
+      "identifier": "com.example.matrix",
+      "icons": {
+        "linux": "icon.png",
+        "macos": "icon.png"
+      }
+    }
+  }
+}
