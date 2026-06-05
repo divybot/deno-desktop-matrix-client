@@ -54,8 +54,8 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-si
 .error { color: var(--danger); font-size: 12.5px; white-space: pre-wrap; }
 
 /* ── App layout ────────────────────────────────────────── */
-#app { display: grid; grid-template-columns: 290px 1fr; }
-.sidebar { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; }
+#app { display: grid; grid-template-columns: 290px 1fr; height: 100vh; }
+.sidebar { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
 .sidebar-header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
 .me-info { flex: 1; min-width: 0; }
 .me-name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -63,7 +63,7 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-si
 .icon-btn { background: transparent; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
 .icon-btn:hover { color: var(--text); background: var(--panel-2); }
 
-.room-list { overflow-y: auto; flex: 1; padding: 6px; }
+.room-list { overflow-y: auto; flex: 1; min-height: 0; padding: 6px; }
 .room {
   display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px;
   cursor: pointer; min-width: 0;
@@ -85,11 +85,11 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-si
 .avatar.small { width: 30px; height: 30px; font-size: 12px; }
 
 /* ── Chat ──────────────────────────────────────────────── */
-.chat { display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+.chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; background: var(--bg); }
 .chat-header { padding: 12px 18px; border-bottom: 1px solid var(--border); }
 .room-title { font-weight: 700; font-size: 15px; }
 .room-topic { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.timeline { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 2px; }
+.timeline { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 2px; }
 .empty-hint { color: var(--muted); margin: auto; }
 
 .msg { display: flex; gap: 10px; padding: 4px 0; }

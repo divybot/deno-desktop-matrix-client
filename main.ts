@@ -46,11 +46,58 @@ function broadcast(obj: unknown) {
   }
 }
 
+// Notification context, tracked on the Deno side.
+let activeRoomId: string | null = null;
+let windowFocused = true;
+win.addEventListener("focus", () => (windowFocused = true));
+win.addEventListener("blur", () => (windowFocused = false));
+
 engine.onEvent = (e) => {
   broadcast(e);
-  // Any room change can move the unread total → refresh the dock badge.
   if (e.kind === "rooms" || e.kind === "timeline") updateBadge();
+  if (e.kind === "timeline") maybeNotify(e);
 };
+
+// Fire a native notification (from the Deno process) for an incoming message
+// in a room the user isn't currently looking at.
+let notifReady = false;
+async function ensureNotifPermission() {
+  if (notifReady || typeof Notification === "undefined") return;
+  notifReady = true;
+  try {
+    if (Notification.permission === "default") await Notification.requestPermission();
+  } catch (err) {
+    console.error("notification permission:", err);
+  }
+}
+
+function maybeNotify(e: { roomId: string; roomName: string; msg: any }) {
+  const { msg } = e;
+  if (msg.mine || msg.type !== "m.room.message") return;
+  const seen = e.roomId === activeRoomId && windowFocused;
+  if (seen) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    Deno.dock?.bounce(false);
+  } catch { /* ignore */ }
+  const title = e.roomName && e.roomName !== msg.senderName
+    ? `${msg.senderName} (${e.roomName})`
+    : msg.senderName;
+  try {
+    const n = new Notification(title, {
+      body: String(msg.body ?? "").slice(0, 200),
+      tag: e.roomId,
+      icon: msg.avatarUrl ?? undefined,
+    });
+    n.addEventListener("click", () => {
+      win.show();
+      win.focus();
+      broadcast({ kind: "openRoom", roomId: e.roomId }); // tell the UI to switch
+    });
+  } catch (err) {
+    console.error("notification failed:", err);
+  }
+}
 
 function updateBadge() {
   const n = engine.totalUnread();
@@ -71,6 +118,7 @@ win.bind("login", async (opts) => {
       : await engine.loginPassword(o.homeserver, o.username, o.password);
     await engine.start(session);
     updateBadge();
+    ensureNotifPermission();
     return { ok: true, session, userId: session.userId };
   } catch (e) {
     return { ok: false, error: humanError(e) };
@@ -81,6 +129,7 @@ win.bind("restore", async (session) => {
   try {
     await engine.start(session as unknown as Session);
     updateBadge();
+    ensureNotifPermission();
     return { ok: true, userId: engine.userId() };
   } catch (e) {
     return { ok: false, error: humanError(e) };
@@ -114,24 +163,18 @@ win.bind("markRead", async (roomId) => {
 
 win.bind("logout", async () => {
   await engine.logout();
+  activeRoomId = null;
   updateBadge();
   return true;
 });
 
-// Desktop chrome the webview drives:
-win.bind("focusWindow", async () => {
-  try {
-    win.show();
-    win.focus();
-  } catch { /* ignore */ }
+// The webview tells us which room is open so notifications can be suppressed
+// for messages the user is already looking at.
+win.bind("setActiveRoom", async (roomId) => {
+  activeRoomId = roomId == null ? null : String(roomId);
   return true;
 });
-win.bind("attention", async () => {
-  try {
-    Deno.dock?.bounce(false);
-  } catch { /* ignore */ }
-  return true;
-});
+
 win.bind("log", async (level, ...parts) => {
   console.log(
     `[webview:${String(level)}]`,

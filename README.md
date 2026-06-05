@@ -26,13 +26,20 @@ in `matrix.ts` and bundled into the app by `deno desktop`.
 
 **Webview → Deno** (bindings exposed via `win.bind(name, fn)`):
 `login`, `restore`, `getRooms`, `selectRoom`, `sendMessage`, `markRead`,
-`logout`, plus desktop helpers `focusWindow`, `attention` (`Deno.dock.bounce`),
+`logout`, `setActiveRoom` (so notifications are suppressed for the open room),
 and `log` (prints webview logs in the Deno terminal).
 
 **Deno → Webview** (Server-Sent Events on `GET /events`): the engine pushes
 `{kind:"sync"|"rooms"|"timeline", …}` messages as Matrix events arrive, so the
-sidebar and open timeline update live. The dock unread badge
-(`Deno.dock.setBadge`) is computed in Deno from the engine's unread totals.
+sidebar and open timeline update live, plus `{kind:"openRoom"}` when a
+notification is clicked.
+
+Everything desktop-native lives on the Deno side: the dock unread badge
+(`Deno.dock.setBadge`, computed from the engine's unread totals), the tray, and
+**native notifications** — `main.ts` fires a `Notification` for an incoming
+message in a room that isn't focused/open (tracking window focus via the
+window's `focus`/`blur` events and the open room via `setActiveRoom`); clicking
+it shows/focuses the window and opens that room.
 
 Session (homeserver + access token) is persisted in the webview's
 `localStorage`; on relaunch `app.js` calls `restore(session)` to skip login.

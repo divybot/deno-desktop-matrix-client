@@ -104,7 +104,6 @@ async function enterApp() {
   showScreen("app");
   renderMe(myUserId);
   $("me-status").textContent = "online";
-  ensureNotifPermission();
   rooms = await call("getRooms");
   renderRoomList();
 }
@@ -137,11 +136,14 @@ function handleEvent(e) {
     case "timeline":
       onTimeline(e);
       break;
+    case "openRoom": // a notification was clicked on the Deno side
+      selectRoom(e.roomId);
+      break;
   }
 }
 
 function onTimeline(e) {
-  const { roomId, roomName, msg } = e;
+  const { roomId, msg } = e;
   if (roomId === currentRoomId) {
     const tl = $("timeline");
     tl.querySelector(".empty-hint")?.remove();
@@ -150,8 +152,7 @@ function onTimeline(e) {
     if (nearBottom || msg.mine) scrollToBottom();
     if (windowFocused) call("markRead", roomId).catch(() => {});
   }
-  const unseen = roomId !== currentRoomId || !windowFocused;
-  if (!msg.mine && unseen && msg.type === "m.room.message") notify(roomName, roomId, msg);
+  // Notifications are fired on the Deno side (see main.ts maybeNotify).
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
@@ -184,6 +185,7 @@ function renderRoomList() {
 // ── Open a room ────────────────────────────────────────────────────────────
 async function selectRoom(roomId) {
   currentRoomId = roomId;
+  call("setActiveRoom", roomId).catch(() => {}); // suppress notifications for this room
   for (const [id, el] of roomEls) el.classList.toggle("active", id === roomId);
   roomEls.get(roomId)?.classList.remove("unread");
   roomEls.get(roomId)?.querySelector(".badge")?.remove();
@@ -264,38 +266,6 @@ function setupComposer(roomId, encrypted, name) {
     }
     // The echo arrives via the SSE 'timeline' event and renders itself.
   };
-}
-
-// ── Notifications ──────────────────────────────────────────────────────────
-let notifAsked = false;
-async function ensureNotifPermission() {
-  if (notifAsked) return;
-  notifAsked = true;
-  try {
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      await Notification.requestPermission();
-    }
-  } catch (e) {
-    log("notification permission error:", String(e));
-  }
-}
-function notify(roomName, roomId, msg) {
-  call("attention").catch(() => {});
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  const title = roomName && roomName !== msg.senderName ? `${msg.senderName} (${roomName})` : msg.senderName;
-  try {
-    const n = new Notification(title, {
-      body: (msg.body || "").slice(0, 200),
-      tag: roomId,
-      icon: msg.avatarUrl || undefined,
-    });
-    n.onclick = () => {
-      call("focusWindow").catch(() => {});
-      selectRoom(roomId);
-    };
-  } catch (e) {
-    log("notification failed:", String(e));
-  }
 }
 
 // ── Rendering primitives ───────────────────────────────────────────────────
