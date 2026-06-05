@@ -74,7 +74,8 @@ async function ensureNotifPermission() {
 
 function maybeNotify(e: { roomId: string; roomName: string; msg: any }) {
   const { msg } = e;
-  if (msg.mine || msg.type !== "m.room.message") return;
+  if (msg.mine) return;
+  if (msg.type !== "m.room.message" && msg.type !== "m.room.encrypted") return;
   const seen = e.roomId === activeRoomId && windowFocused;
   if (seen) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
@@ -84,9 +85,14 @@ function maybeNotify(e: { roomId: string; roomName: string; msg: any }) {
   const title = e.roomName && e.roomName !== msg.senderName
     ? `${msg.senderName} (${e.roomName})`
     : msg.senderName;
+  // For an encrypted event we likely don't have clear text yet at notify time;
+  // show a neutral body rather than the "Decrypting…" placeholder.
+  const body = msg.type === "m.room.encrypted"
+    ? "🔒 New message"
+    : String(msg.body ?? "").slice(0, 200);
   try {
     const n = new Notification(title, {
-      body: String(msg.body ?? "").slice(0, 200),
+      body,
       tag: e.roomId,
       icon: msg.avatarUrl ?? undefined,
     });

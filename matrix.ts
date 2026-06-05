@@ -40,12 +40,15 @@ export interface TimelineMsg {
 export type EngineEvent =
   | { kind: "sync"; state: string }
   | { kind: "rooms"; rooms: RoomSummary[] }
-  | { kind: "timeline"; roomId: string; roomName: string; msg: TimelineMsg };
+  | { kind: "timeline"; roomId: string; roomName: string; msg: TimelineMsg }
+  | { kind: "decrypted"; roomId: string; msg: TimelineMsg };
 
 export class MatrixEngine {
   private client: any = null;
   private baseUrl = "";
   private roomsDebounce: ReturnType<typeof setTimeout> | null = null;
+  private ready = false; // becomes true once the initial sync (PREPARED) is done
+  private cryptoEnabled = false; // end-to-end encryption available this session
   /** Set by the consumer to receive live updates. */
   onEvent: (e: EngineEvent) => void = () => {};
 
@@ -97,18 +100,49 @@ export class MatrixEngine {
       accessToken: session.accessToken,
       userId: session.userId,
       deviceId: session.deviceId,
-      // No crypto store in this demo — encrypted rooms are read-only.
     });
 
+    this.ready = false;
+    this.cryptoEnabled = false;
     const c = this.client;
+
+    // End-to-end encryption via the Rust crypto stack (WASM). Uses an
+    // in-memory store (no IndexedDB in Deno), so keys live for the session:
+    // messages sent/received while running decrypt, but history from before
+    // launch may be undecryptable. Sending to all devices (we don't block on
+    // verification). Degrades gracefully to read-only if init fails.
+    try {
+      await c.initRustCrypto({ useIndexedDB: false });
+      // Default policy sends to all devices (we don't gate on verification),
+      // which is what we want for this demo.
+      this.cryptoEnabled = true;
+    } catch (e) {
+      console.error("crypto init failed (encrypted rooms will be read-only):", e);
+    }
+
+    // Live (and backlog) decryption: an encrypted event renders a placeholder,
+    // then updates here once the clear text is available.
+    c.on("Event.decrypted", (event: any) => {
+      if (!this.ready) return; // backlog decrypts are picked up when a room opens
+      const room = this.client.getRoom(event.getRoomId());
+      if (!room || !isRenderable(event)) return;
+      this.onEvent({ kind: "decrypted", roomId: room.roomId, msg: this.mapEvent(room, event) });
+    });
     c.on("sync", (state: string) => {
       this.onEvent({ kind: "sync", state });
-      if (state === "PREPARED") this.emitRooms();
+      if (state === "PREPARED") {
+        this.ready = true;
+        this.emitRooms();
+      }
     });
     c.on("Room.timeline", (event: any, room: any, toStart: boolean, _r: boolean, data: any) => {
       if (toStart) return;
       if (data && data.liveEvent === false) return;
       if (!isRenderable(event)) return;
+      // Suppress the initial-sync backlog: matrix-js-sdk replays each room's
+      // recent history as timeline events before PREPARED — those are not new,
+      // so don't render-append or notify for them.
+      if (!this.ready) return;
       this.onEvent({
         kind: "timeline",
         roomId: room.roomId,
@@ -166,14 +200,22 @@ export class MatrixEngine {
       .map((e: any) => this.mapEvent(room, e));
   }
 
-  roomInfo(roomId: string): { name: string; topic: string; encrypted: boolean } {
+  roomInfo(
+    roomId: string,
+  ): { name: string; topic: string; encrypted: boolean; canSend: boolean } {
     const room = this.client?.getRoom(roomId);
-    if (!room) return { name: roomId, topic: "", encrypted: false };
+    if (!room) return { name: roomId, topic: "", encrypted: false, canSend: false };
+    const encrypted = this.isEncrypted(room);
     return {
       name: room.name || roomId,
       topic: this.topic(room),
-      encrypted: this.isEncrypted(room),
+      encrypted,
+      canSend: !encrypted || this.cryptoEnabled,
     };
+  }
+
+  cryptoReady(): boolean {
+    return this.cryptoEnabled;
   }
 
   totalUnread(): number {
@@ -183,10 +225,10 @@ export class MatrixEngine {
   // ── Writes ──────────────────────────────────────────────────────────────────
   async send(roomId: string, body: string): Promise<void> {
     const room = this.client?.getRoom(roomId);
-    if (this.isEncrypted(room)) {
-      throw new Error("This room is encrypted; sending is disabled in this demo.");
+    if (this.isEncrypted(room) && !this.cryptoEnabled) {
+      throw new Error("Encryption isn't available this session; can't send to this room.");
     }
-    await this.client.sendTextMessage(roomId, body);
+    await this.client.sendTextMessage(roomId, body); // SDK encrypts automatically when needed
   }
 
   markRead(roomId: string): void {
@@ -223,6 +265,15 @@ export class MatrixEngine {
       preset: "trusted_private_chat",
     });
     return room_id;
+  }
+
+  // Thin passthroughs (used by tests / future UI).
+  async createRoom(opts: any): Promise<string> {
+    const { room_id } = await this.client.createRoom(opts);
+    return room_id;
+  }
+  async joinRoom(roomId: string): Promise<void> {
+    await this.client.joinRoom(roomId);
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -331,9 +382,8 @@ function unreadCount(room: any): number {
 }
 
 function messageText(event: any): string {
-  if (event.getType() === "m.room.encrypted") {
-    return "🔒 Encrypted message (decryption is disabled in this demo)";
-  }
+  if (event.isDecryptionFailure?.()) return "🔒 Unable to decrypt this message";
+  if (event.getType() === "m.room.encrypted") return "🔒 Decrypting…";
   const c = event.getContent() || {};
   switch (c.msgtype) {
     case "m.emote":

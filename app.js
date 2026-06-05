@@ -131,6 +131,9 @@ function handleEvent(e) {
     case "openRoom": // a notification (or tray item) was clicked on the Deno side
       selectRoom(e.roomId);
       break;
+    case "decrypted": // an encrypted message's clear text became available
+      applyDecrypted(e);
+      break;
     case "nav": // Next/Previous Room from the menu bar
       navRoom(e.dir);
       break;
@@ -163,6 +166,21 @@ function onTimeline(e) {
     if (windowFocused) call("markRead", roomId).catch(() => {});
   }
   // Notifications are fired on the Deno side (see main.ts maybeNotify).
+}
+
+// Replace an encrypted placeholder with its decrypted text, in place.
+function applyDecrypted(e) {
+  if (e.roomId !== currentRoomId) return;
+  for (const n of $("timeline").querySelectorAll(".msg")) {
+    if (n.dataset.eventId !== e.msg.eventId) continue;
+    const textEl = n.querySelector(".msg-text");
+    if (textEl) {
+      textEl.textContent = e.msg.body;
+      textEl.className = "msg-text" +
+        (e.msg.msgtype === "m.notice" ? " notice" : e.msg.msgtype === "m.emote" ? " emote" : "");
+    }
+    break;
+  }
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
@@ -212,7 +230,7 @@ async function selectRoom(roomId) {
   $("room-title").textContent = res.name || roomId;
   $("room-topic").textContent = res.topic || "";
   renderTimeline(res.messages || []);
-  setupComposer(roomId, res.encrypted, res.name);
+  setupComposer(roomId, res);
 }
 
 function renderTimeline(messages) {
@@ -243,15 +261,17 @@ function renderTimeline(messages) {
 }
 
 // ── Composer ─────────────────────────────────────────────────────────────────
-function setupComposer(roomId, encrypted, name) {
+function setupComposer(roomId, info) {
+  const { encrypted, canSend, name } = info;
   const form = $("composer");
   const input = $("composer-input");
   form.hidden = false;
-  form.classList.toggle("disabled", encrypted);
-  input.disabled = encrypted;
-  input.placeholder = encrypted
-    ? "🔒 Encrypted room — sending is disabled in this demo"
-    : `Message ${name || ""}`.trim() + "…";
+  const locked = !canSend; // encrypted room but crypto unavailable this session
+  form.classList.toggle("disabled", locked);
+  input.disabled = locked;
+  input.placeholder = locked
+    ? "🔒 Encryption unavailable — can’t send to this room"
+    : (encrypted ? "🔒 " : "") + `Message ${name || ""}`.trim() + "…";
 
   input.oninput = () => {
     input.style.height = "auto";
@@ -266,7 +286,7 @@ function setupComposer(roomId, encrypted, name) {
   form.onsubmit = async (e) => {
     e.preventDefault();
     const body = input.value.trim();
-    if (!body || encrypted) return;
+    if (!body || locked) return;
     input.value = "";
     input.style.height = "auto";
     const r = await call("sendMessage", roomId, body).catch((err) => ({ ok: false, error: String(err) }));
@@ -282,6 +302,7 @@ function setupComposer(roomId, encrypted, name) {
 function renderMsg(msg, continuation) {
   const wrap = document.createElement("div");
   wrap.className = "msg" + (continuation ? " cont" : "");
+  wrap.dataset.eventId = msg.eventId; // so decrypted updates can find it
   wrap.appendChild(avatarFor(msg.senderName, msg.avatarUrl));
 
   const body = document.createElement("div");

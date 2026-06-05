@@ -166,18 +166,31 @@ same code `main.ts` runs) against any homeserver:
 deno run -A test_matrix.ts http://localhost:8008
 ```
 
-It registers two users, logs in, has user A create/​invite, syncs both to
-`PREPARED`, then asserts B receives A's message live and vice-versa. Exit code 0
+It registers two users, logs in, syncs both to `PREPARED`, checks live
+send/receive in a plain room, **and verifies end-to-end encryption** (creates an
+encrypted room and asserts the other user decrypts the message). Exit code 0
 means all checks passed.
+
+## Encryption (E2EE)
+
+The engine initializes the Rust crypto stack (`client.initRustCrypto()`), so
+**encrypted rooms work**: incoming messages are decrypted (rendering a
+*“🔒 Decrypting…”* placeholder that's replaced in place once the clear text
+arrives, via an `Event.decrypted` → SSE `decrypted` update), and you can send to
+encrypted rooms (the SDK encrypts with Megolm automatically). The composer is
+only locked if crypto failed to initialize.
+
+It uses an **in-memory** crypto store (Deno has no IndexedDB), so keys live for
+the session: messages exchanged while running decrypt, but history from *before*
+launch — and rooms whose keys you never received — may show
+*“🔒 Unable to decrypt”*. Device verification / cross-signing isn't implemented
+(messages are sent to all of a user's devices).
 
 ## Limitations
 
-- **No end-to-end encryption.** This demo does not initialize a crypto store, so
-  end-to-end-encrypted rooms are read-only: their messages render as
-  *“🔒 Encrypted message”* and the composer is disabled for them. Unencrypted
-  rooms work fully. (Adding E2EE means calling `client.initRustCrypto()` with a
-  persistent store.)
-- Uses the in-memory store, so each launch performs a fresh initial sync.
+- In-memory store (sync + crypto), so each launch performs a fresh initial sync
+  and can't decrypt pre-launch encrypted history.
+- No device verification / cross-signing UI.
 
 ## Security
 
