@@ -8,6 +8,18 @@ and the desktop-native chrome `deno desktop` exposes: a **tray** with a
 click-to-open menu, a **dock/taskbar unread badge**, a **native menu bar**, and
 native **notifications**.
 
+## Screenshots
+
+<!-- Drop screenshots into screenshots/ and they'll show up here. -->
+
+| Main window | Login |
+| --- | --- |
+| ![Main window — room list, timeline, composer](screenshots/main.png) | ![Login screen](screenshots/login.png) |
+
+| Tray menu | Notification |
+| --- | --- |
+| ![Tray popover menu](screenshots/tray.png) | ![Native notification](screenshots/notification.png) |
+
 ## Architecture
 
 The **Matrix SDK runs in the Deno process**, not the webview. The webview is a
