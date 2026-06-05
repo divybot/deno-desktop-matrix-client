@@ -25,6 +25,55 @@ import STYLES_CSS from "./styles.css" with { type: "text" };
 
 const engine = new MatrixEngine();
 
+// The tray popover ("menu" shown on left-click). A tiny self-contained page
+// loaded into the attached panel window; it talks to Deno via panel bindings
+// and re-renders live off the shared /events SSE stream.
+const TRAY_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
+  html,body{margin:0;height:100%;font-family:-apple-system,system-ui,sans-serif;background:#1b2027;color:#e7ecf2;font-size:13px}
+  body{display:flex;flex-direction:column;padding:8px;box-sizing:border-box}
+  .hdr{font-size:11px;color:#8b97a7;padding:4px 8px 8px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  .list{flex:1;overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:1px}
+  button.item{display:flex;width:100%;align-items:center;gap:9px;background:transparent;border:0;color:inherit;text-align:left;padding:7px 8px;border-radius:8px;cursor:pointer;font-size:13px}
+  button.item:hover{background:#222933}
+  .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge{background:#0dbd8b;color:#04150f;border-radius:10px;padding:0 7px;font-size:11px;font-weight:700}
+  .dot{width:26px;height:26px;border-radius:50%;color:#04150f;display:grid;place-items:center;font-weight:700;text-transform:uppercase;flex:0 0 auto}
+  .sep{height:1px;background:#2c343f;margin:6px 4px}
+  .muted{color:#8b97a7;padding:12px 8px}
+</style></head><body>
+  <div class="hdr" id="hdr">Matrix</div>
+  <div class="list" id="list"></div>
+  <div class="sep"></div>
+  <div id="actions"></div>
+<script>
+  const $=id=>document.getElementById(id);
+  async function call(n,...a){for(let i=0;i<40;i++){const f=globalThis.bindings&&globalThis.bindings[n];if(typeof f==="function")return await f(...a);await new Promise(r=>setTimeout(r,50));}}
+  function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;}
+  function colorFor(k){let h=0;for(let i=0;i<(k||"").length;i++)h=(h*31+k.charCodeAt(i))>>>0;const c=["#0dbd8b","#368bd6","#ac3ba8","#e64f7a","#ff812d","#2dc2c5","#5c56f5","#74d12c"];return c[h%c.length];}
+  async function render(){
+    const d=await call("trayData"); if(!d)return;
+    $("hdr").textContent=!d.signedIn?"Not signed in":(d.total>0?d.total+" unread":"No unread messages");
+    const list=$("list"); list.innerHTML="";
+    if(d.signedIn&&d.rooms.length){
+      for(const r of d.rooms){
+        const b=el("button","item");
+        const av=el("div","dot",(r.name||"?").replace(/^[@#!]/,"").charAt(0)); av.style.background=colorFor(r.name); b.appendChild(av);
+        b.appendChild(el("div","name",r.name));
+        b.appendChild(el("div","badge",String(r.unread)));
+        b.onclick=()=>call("trayOpen",r.roomId);
+        list.appendChild(b);
+      }
+    } else { list.appendChild(el("div","muted",d.signedIn?"You are all caught up.":"Open the window to sign in.")); }
+    const acts=$("actions"); acts.innerHTML="";
+    const add=(label,fn,en)=>{const b=el("button","item",label);if(en===false)b.style.opacity=.5;else b.onclick=fn;acts.appendChild(b);};
+    if(d.signedIn){ add("✓   Mark all as read",()=>call("trayMarkAll"),d.total>0); add("✎   New Direct Message…",()=>call("trayNewDm")); }
+    add("⤢   Show Window",()=>call("trayShow"));
+    add("⏻   Quit",()=>call("trayQuit"));
+  }
+  try{const es=new EventSource("/events");es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.kind==="rooms"||d.kind==="sync")render();}catch(_){}};}catch(_){}
+  render();
+</script></body></html>`;
+
 // ── Window ────────────────────────────────────────────────────────────────
 const win = new Deno.BrowserWindow({
   title: "Matrix",
@@ -275,15 +324,15 @@ function refreshTrayMenu() {
   } catch { /* ignore */ }
 }
 
+let trayPanel: Deno.TrayPanel | null = null;
+
 try {
   tray = new Deno.Tray();
   tray.setIcon(makeTrayIconPng(32));
   tray.setTooltip("Matrix");
+  // Right-click still opens the native menu (just-wef reserves right-click for
+  // it); left-click toggles the popover panel attached after the server starts.
   tray.setMenu(trayMenuItems());
-  tray.addEventListener("click", () => {
-    win.show();
-    win.focus();
-  });
   tray.addEventListener("menuclick", async (e) => {
     const id = (e as CustomEvent<{ id: string }>).detail.id;
     if (id === "show") {
@@ -483,9 +532,11 @@ function quit() {
 const text = (body: string, type: string) =>
   new Response(body, { headers: { "content-type": type } });
 
-Deno.serve((req) => {
+const httpServer = Deno.serve((req) => {
   const url = new URL(req.url);
   switch (url.pathname) {
+    case "/tray":
+      return text(TRAY_HTML, "text/html; charset=utf-8");
     case "/events": {
       // Server-Sent Events: stream live Matrix events to the webview.
       let ctrl: ReadableStreamDefaultController<Uint8Array>;
@@ -518,24 +569,117 @@ Deno.serve((req) => {
 // Heartbeat so the SSE connection (and any proxies) stay alive.
 setInterval(() => broadcast({ kind: "ping" }), 25000);
 
+// ── Tray popover (left-click "menu") ─────────────────────────────────────────
+// just-wef reserves right-click for the native menu, so the click-to-open
+// "menu" is a frameless popover anchored under the icon (the documented
+// menu-bar-app pattern). It reuses the same SSE stream to stay live.
+if (tray) {
+  try {
+    const panelUrl = `http://127.0.0.1:${(httpServer.addr as Deno.NetAddr).port}/tray`;
+    trayPanel = tray.attachPanel({ url: panelUrl, width: 300, height: 380, hideOnBlur: true });
+    const panel = trayPanel.window;
+
+    panel.bind("trayData", async () => {
+      const rooms = engine.isLoggedIn() ? engine.getRooms() : [];
+      return {
+        signedIn: engine.isLoggedIn(),
+        total: rooms.reduce((n, r) => n + r.unread, 0),
+        rooms: rooms.filter((r) => r.unread > 0).slice(0, 8).map((r) => ({
+          roomId: r.roomId,
+          name: r.name,
+          unread: r.unread,
+        })),
+      };
+    });
+    panel.bind("trayOpen", async (roomId) => {
+      trayPanel?.hide();
+      win.show();
+      win.focus();
+      broadcast({ kind: "openRoom", roomId: String(roomId) });
+      return true;
+    });
+    panel.bind("trayMarkAll", async () => {
+      engine.markAllRead();
+      updateBadge();
+      return true;
+    });
+    panel.bind("trayNewDm", async () => {
+      trayPanel?.hide();
+      win.show();
+      win.focus();
+      await newDirectMessage();
+      return true;
+    });
+    panel.bind("trayShow", async () => {
+      trayPanel?.hide();
+      win.show();
+      win.focus();
+      return true;
+    });
+    panel.bind("trayQuit", async () => {
+      quit();
+      return true;
+    });
+  } catch (e) {
+    console.error("Tray panel unavailable:", e);
+  }
+}
+
 console.log("Matrix Client running. Window id:", win.windowId);
 
 // ── Tray icon PNG (generated in-code so nothing is read from disk) ───────────
 function makeTrayIconPng(size: number): Uint8Array {
   const rowLen = 1 + size * 4;
   const raw = new Uint8Array(rowLen * size);
-  const c = (size - 1) / 2;
-  const r = size / 2 - 1;
-  for (let y = 0; y < size; y++) {
+  const S = size;
+
+  // A chat speech bubble: rounded-rect body + a tail, with three dots cut out.
+  // Drawn in solid black on transparent so macOS renders it as a template image
+  // (auto-adapts to light/dark menu bars).
+  const inRoundRect = (px: number, py: number, x0: number, y0: number, x1: number, y1: number, rad: number) => {
+    const qx = Math.max(x0 + rad, Math.min(px, x1 - rad));
+    const qy = Math.max(y0 + rad, Math.min(py, y1 - rad));
+    return (px - qx) ** 2 + (py - qy) ** 2 <= rad * rad;
+  };
+  const inTri = (px: number, py: number, ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+    const s = (x1: number, y1: number, x2: number, y2: number, x3: number, y3: number) =>
+      (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
+    const d1 = s(px, py, ax, ay, bx, by);
+    const d2 = s(px, py, bx, by, cx, cy);
+    const d3 = s(px, py, cx, cy, ax, ay);
+    return !(((d1 < 0) || (d2 < 0) || (d3 < 0)) && ((d1 > 0) || (d2 > 0) || (d3 > 0)));
+  };
+  const inBubble = (px: number, py: number) => {
+    let on = inRoundRect(px, py, 0.12 * S, 0.10 * S, 0.88 * S, 0.62 * S, 0.17 * S) ||
+      inTri(px, py, 0.30 * S, 0.57 * S, 0.30 * S, 0.86 * S, 0.55 * S, 0.57 * S);
+    if (on) {
+      const cy = 0.36 * S, rr = 0.052 * S;
+      for (const cx of [0.34 * S, 0.50 * S, 0.66 * S]) {
+        if ((px - cx) ** 2 + (py - cy) ** 2 <= rr * rr) {
+          on = false;
+          break;
+        }
+      }
+    }
+    return on;
+  };
+
+  for (let y = 0; y < S; y++) {
     const o = y * rowLen;
-    raw[o] = 0;
-    for (let x = 0; x < size; x++) {
-      const inside = (x - c) ** 2 + (y - c) ** 2 <= r * r;
+    raw[o] = 0; // filter: none
+    for (let x = 0; x < S; x++) {
+      // 3×3 supersample for smooth edges
+      let hits = 0;
+      for (let sy = 0; sy < 3; sy++) {
+        for (let sx = 0; sx < 3; sx++) {
+          if (inBubble(x + (sx + 0.5) / 3, y + (sy + 0.5) / 3)) hits++;
+        }
+      }
       const p = o + 1 + x * 4;
-      raw[p] = 0x0d;
-      raw[p + 1] = 0xbd;
-      raw[p + 2] = 0x8b;
-      raw[p + 3] = inside ? 0xff : 0x00;
+      raw[p] = 0x00;
+      raw[p + 1] = 0x00;
+      raw[p + 2] = 0x00;
+      raw[p + 3] = Math.round((hits / 9) * 255);
     }
   }
   const table = new Uint32Array(256);

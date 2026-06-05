@@ -132,11 +132,19 @@ Linux, a dir / `.exe` on Windows).
 
 ### Desktop features
 
-- **Tray icon — quick access to unread chats.** Its menu (rebuilt as rooms
-  change) shows the total unread count, lists your **unread rooms** (click one to
-  open it without hunting through the sidebar), and offers **Mark All as Read**,
-  **New Direct Message…**, **Show Window**, and **Quit**. Clicking the icon
-  shows/focuses the window. Closing the window hides it to the tray.
+- **Tray icon — quick access to unread chats.** A speech-bubble status-bar icon
+  (a macOS template image, so it adapts to light/dark). **Left-click opens a
+  popover "menu"** (a frameless `Tray.attachPanel` window) that shows the total
+  unread count, lists your **unread rooms** (click one to open it), and offers
+  **Mark All as Read**, **New Direct Message…**, **Show Window**, and **Quit** —
+  it re-renders live off the same `/events` SSE stream. The **right-click**
+  native menu (`Tray.setMenu`) offers the same actions. Closing the window hides
+  it to the tray.
+
+  > Why a popover for left-click? `just-wef` reserves **right-click** for the
+  > native tray menu and routes **left-click** to the `click` handler — there's
+  > no API to pop the native menu on left-click — so the click-menu is built with
+  > `attachPanel`, the documented menu-bar-app pattern.
 - **Native menu bar** (`win.setApplicationMenu`), with working actions and
   accelerators:
   - **File** — *New Direct Message…* (`⌘N`, prompts for a user id and opens the
