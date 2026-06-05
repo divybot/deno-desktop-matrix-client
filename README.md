@@ -103,10 +103,12 @@ deno desktop --output MatrixClient --icon icon.png \
 This produces a platform bundle (`.app` on macOS, an app dir / `.AppImage` on
 Linux, a dir / `.exe` on Windows).
 
-> Note: the bundle is built from `main.ts`'s module graph. `index.html`,
-> `app.js`, `styles.css`, and `icon.png` are read at runtime from the file's
-> directory, so keep them alongside the entry (the dev run above is the
-> primary, fully-working path).
+> `deno desktop` compiles the entry into a self-contained binary, so the UI
+> assets (`index.html`, `app.js`, `styles.css`) are **embedded** into the module
+> graph via `import … with { type: "text" }` in `main.ts` — they're served from
+> memory at runtime (and still hot-reload from disk under `--hmr`). The tray
+> icon is generated in-code; `icon.png` is only used at build time for the app
+> icon (`--icon` / `desktop.app.icons`).
 
 ## Using it
 

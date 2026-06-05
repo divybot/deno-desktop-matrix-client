@@ -15,7 +15,14 @@
 
 import { humanError, MatrixEngine, type Session } from "./matrix.ts";
 
-const HERE = new URL(".", import.meta.url);
+// Embed the UI assets into the module graph as text. `deno desktop` compiles
+// the entry into a self-contained binary, so reading sibling files at runtime
+// would fail — importing them with `{ type: "text" }` bundles them in (and
+// still hot-reloads from disk under `--hmr`).
+import INDEX_HTML from "./index.html" with { type: "text" };
+import APP_JS from "./app.js" with { type: "text" };
+import STYLES_CSS from "./styles.css" with { type: "text" };
+
 const engine = new MatrixEngine();
 
 // ── Window ────────────────────────────────────────────────────────────────
@@ -137,7 +144,7 @@ win.bind("log", async (level, ...parts) => {
 let tray: Deno.Tray | null = null;
 try {
   tray = new Deno.Tray();
-  tray.setIcon(await loadIconBytes());
+  tray.setIcon(makeTrayIconPng(32));
   tray.setTooltip("Matrix");
   tray.setMenu([
     { item: { label: "Show Window", id: "show", enabled: true } },
@@ -195,14 +202,8 @@ function quit() {
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
-async function serveFile(name: string, type: string): Promise<Response> {
-  try {
-    const body = await Deno.readFile(new URL(name, HERE));
-    return new Response(body, { headers: { "content-type": type } });
-  } catch {
-    return new Response(`// failed to read ${name}`, { status: 500 });
-  }
-}
+const text = (body: string, type: string) =>
+  new Response(body, { headers: { "content-type": type } });
 
 Deno.serve((req) => {
   const url = new URL(req.url);
@@ -228,11 +229,11 @@ Deno.serve((req) => {
       });
     }
     case "/app.js":
-      return serveFile("app.js", "application/javascript; charset=utf-8");
+      return text(APP_JS, "application/javascript; charset=utf-8");
     case "/styles.css":
-      return serveFile("styles.css", "text/css; charset=utf-8");
+      return text(STYLES_CSS, "text/css; charset=utf-8");
     default:
-      return serveFile("index.html", "text/html; charset=utf-8");
+      return text(INDEX_HTML, "text/html; charset=utf-8");
   }
 });
 
@@ -241,16 +242,8 @@ setInterval(() => broadcast({ kind: "ping" }), 25000);
 
 console.log("Matrix Client running. Window id:", win.windowId);
 
-// ── Fallback PNG generator (only used if icon.png is missing) ────────────────
-async function loadIconBytes(): Promise<Uint8Array> {
-  try {
-    return await Deno.readFile(new URL("icon.png", HERE));
-  } catch {
-    return makeFallbackIconPng(32);
-  }
-}
-
-function makeFallbackIconPng(size: number): Uint8Array {
+// ── Tray icon PNG (generated in-code so nothing is read from disk) ───────────
+function makeTrayIconPng(size: number): Uint8Array {
   const rowLen = 1 + size * 4;
   const raw = new Uint8Array(rowLen * size);
   const c = (size - 1) / 2;
