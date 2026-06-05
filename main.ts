@@ -1,27 +1,22 @@
 // Matrix Client — Deno desktop side.
 //
-// This file is intentionally thin. It:
-//   1. serves the UI shell (index.html + app.js) over Deno.serve,
+// In this architecture the *Matrix SDK runs here, in the Deno process*
+// (see matrix.ts). main.ts:
+//   1. serves the UI shell (index.html + app.js + an SSE stream) over Deno.serve,
 //   2. opens a Chromium webview window pointed at that server,
-//   3. owns the desktop-native chrome that needs `Deno.*`: the tray icon,
-//      the dock/taskbar unread badge, and window lifecycle.
+//   3. exposes the engine to the webview as bindings (login/getRooms/
+//      selectRoom/sendMessage/...),
+//   4. pushes live Matrix events to the UI over the SSE route,
+//   5. owns the desktop-native chrome (tray icon, dock unread badge, window
+//      lifecycle).
 //
-// All Matrix logic (login, sync, timeline, sending, web Notifications) lives
-// in the webview in app.js, talking to this process through `bind()` handlers
-// exposed to the page as `globalThis.bindings.*`.
+// The webview (app.js) holds no SDK — it just calls bindings and renders what
+// it receives.
+
+import { humanError, MatrixEngine, type Session } from "./matrix.ts";
 
 const HERE = new URL(".", import.meta.url);
-
-// ── Load the tray/app icon ────────────────────────────────────────────────
-// Raw PNG bytes for the tray. Falls back to a generated dot if icon.png is
-// missing so the app still runs.
-async function loadIconBytes(): Promise<Uint8Array> {
-  try {
-    return await Deno.readFile(new URL("icon.png", HERE));
-  } catch {
-    return makeFallbackIconPng(32);
-  }
-}
+const engine = new MatrixEngine();
 
 // ── Window ────────────────────────────────────────────────────────────────
 const win = new Deno.BrowserWindow({
@@ -31,25 +26,92 @@ const win = new Deno.BrowserWindow({
   resizable: true,
 });
 
-// ── Desktop bindings the webview calls ──────────────────────────────────────
+// ── SSE: push engine events to the webview ───────────────────────────────────
+const subscribers = new Set<ReadableStreamDefaultController<Uint8Array>>();
+const enc = new TextEncoder();
 
-// Total unread count → dock/taskbar badge (+ keep the tray tooltip in sync).
-win.bind("setUnread", async (count) => {
-  const n = Number(count) || 0;
+function broadcast(obj: unknown) {
+  const bytes = enc.encode(`data: ${JSON.stringify(obj)}\n\n`);
+  for (const c of subscribers) {
+    try {
+      c.enqueue(bytes);
+    } catch { /* dropped subscriber */ }
+  }
+}
+
+engine.onEvent = (e) => {
+  broadcast(e);
+  // Any room change can move the unread total → refresh the dock badge.
+  if (e.kind === "rooms" || e.kind === "timeline") updateBadge();
+};
+
+function updateBadge() {
+  const n = engine.totalUnread();
   try {
     Deno.dock?.setBadge(n > 0 ? String(n) : null);
-  } catch { /* dock is best-effort / platform-dependent */ }
-  tray?.setTooltip(n > 0 ? `Matrix — ${n} unread` : "Matrix");
+  } catch { /* best-effort */ }
+  tray?.setTooltip(
+    `Matrix${engine.userId() ? " — " + engine.userId() : ""}${n > 0 ? ` (${n})` : ""}`,
+  );
+}
+
+// ── Bindings the webview calls ───────────────────────────────────────────────
+win.bind("login", async (opts) => {
+  const o = (opts ?? {}) as Record<string, string>;
+  try {
+    const session: Session = o.token
+      ? await engine.loginToken(o.homeserver, o.token)
+      : await engine.loginPassword(o.homeserver, o.username, o.password);
+    await engine.start(session);
+    updateBadge();
+    return { ok: true, session, userId: session.userId };
+  } catch (e) {
+    return { ok: false, error: humanError(e) };
+  }
+});
+
+win.bind("restore", async (session) => {
+  try {
+    await engine.start(session as unknown as Session);
+    updateBadge();
+    return { ok: true, userId: engine.userId() };
+  } catch (e) {
+    return { ok: false, error: humanError(e) };
+  }
+});
+
+win.bind("getRooms", async () => engine.getRooms() as unknown as Record<string, unknown>[]);
+
+win.bind("selectRoom", async (roomId) => {
+  const id = String(roomId);
+  const info = engine.roomInfo(id);
+  const messages = engine.getTimeline(id);
+  engine.markRead(id);
+  return { ok: true, ...info, messages };
+});
+
+win.bind("sendMessage", async (roomId, body) => {
+  try {
+    await engine.send(String(roomId), String(body));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: humanError(e) };
+  }
+});
+
+win.bind("markRead", async (roomId) => {
+  engine.markRead(String(roomId));
+  updateBadge();
   return true;
 });
 
-// Let the UI override the tray tooltip (e.g. show the logged-in user).
-win.bind("setTrayTooltip", async (text) => {
-  tray?.setTooltip(text == null ? "Matrix" : String(text));
+win.bind("logout", async () => {
+  await engine.logout();
+  updateBadge();
   return true;
 });
 
-// Bring the window to the foreground — used when a notification is clicked.
+// Desktop chrome the webview drives:
 win.bind("focusWindow", async () => {
   try {
     win.show();
@@ -57,20 +119,17 @@ win.bind("focusWindow", async () => {
   } catch { /* ignore */ }
   return true;
 });
-
-// Bounce the dock / flash the taskbar (called on a notification while unfocused).
 win.bind("attention", async () => {
   try {
     Deno.dock?.bounce(false);
   } catch { /* ignore */ }
   return true;
 });
-
-// Surface webview logs in the Deno terminal — invaluable for debugging,
-// especially when running under Xvfb where the devtools aren't visible.
 win.bind("log", async (level, ...parts) => {
-  const tag = `[webview:${String(level)}]`;
-  console.log(tag, ...parts.map((p) => typeof p === "string" ? p : JSON.stringify(p)));
+  console.log(
+    `[webview:${String(level)}]`,
+    ...parts.map((p) => (typeof p === "string" ? p : JSON.stringify(p))),
+  );
   return true;
 });
 
@@ -85,13 +144,10 @@ try {
     "separator",
     { item: { label: "Quit", id: "quit", enabled: true } },
   ]);
-
-  // Clicking the tray icon shows + focuses the window (where supported).
   tray.addEventListener("click", () => {
     win.show();
     win.focus();
   });
-
   tray.addEventListener("menuclick", (e) => {
     const id = (e as CustomEvent<{ id: string }>).detail.id;
     if (id === "show") {
@@ -106,29 +162,29 @@ try {
 }
 
 // ── Window lifecycle ─────────────────────────────────────────────────────────
-// Closing the window hides it to the tray instead of quitting (classic chat-app
-// behavior). Use the tray's "Quit" item to actually exit.
+// Closing hides to the tray (classic chat-app behavior); tray ▸ Quit exits.
 let quitting = false;
 win.addEventListener("close", () => {
   if (quitting) return;
-  console.log("Window close requested → hiding to tray (use tray ▸ Quit to exit)");
+  console.log("Window close → hiding to tray (use tray ▸ Quit to exit)");
   try {
     win.hide();
   } catch {
     quit();
   }
 });
-
-// macOS dock-icon click reopens the window.
 try {
   Deno.dock?.addEventListener("reopen", () => {
     win.show();
     win.focus();
   });
-} catch { /* dock may not exist on this platform */ }
+} catch { /* no dock on this platform */ }
 
 function quit() {
   quitting = true;
+  try {
+    engine.logout();
+  } catch { /* ignore */ }
   try {
     tray?.destroy();
   } catch { /* ignore */ }
@@ -138,22 +194,39 @@ function quit() {
   Deno.exit(0);
 }
 
-// ── HTTP server (the UI the webview loads) ──────────────────────────────────
+// ── HTTP server ───────────────────────────────────────────────────────────────
 async function serveFile(name: string, type: string): Promise<Response> {
   try {
     const body = await Deno.readFile(new URL(name, HERE));
     return new Response(body, { headers: { "content-type": type } });
   } catch {
-    return new Response(`// failed to read ${name}`, {
-      status: 500,
-      headers: { "content-type": type },
-    });
+    return new Response(`// failed to read ${name}`, { status: 500 });
   }
 }
 
 Deno.serve((req) => {
   const url = new URL(req.url);
   switch (url.pathname) {
+    case "/events": {
+      // Server-Sent Events: stream live Matrix events to the webview.
+      let ctrl: ReadableStreamDefaultController<Uint8Array>;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          ctrl = controller;
+          subscribers.add(controller);
+          controller.enqueue(enc.encode(": connected\n\n"));
+        },
+        cancel() {
+          subscribers.delete(ctrl);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        },
+      });
+    }
     case "/app.js":
       return serveFile("app.js", "application/javascript; charset=utf-8");
     case "/styles.css":
@@ -163,9 +236,20 @@ Deno.serve((req) => {
   }
 });
 
+// Heartbeat so the SSE connection (and any proxies) stay alive.
+setInterval(() => broadcast({ kind: "ping" }), 25000);
+
 console.log("Matrix Client running. Window id:", win.windowId);
 
 // ── Fallback PNG generator (only used if icon.png is missing) ────────────────
+async function loadIconBytes(): Promise<Uint8Array> {
+  try {
+    return await Deno.readFile(new URL("icon.png", HERE));
+  } catch {
+    return makeFallbackIconPng(32);
+  }
+}
+
 function makeFallbackIconPng(size: number): Uint8Array {
   const rowLen = 1 + size * 4;
   const raw = new Uint8Array(rowLen * size);

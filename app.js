@@ -1,48 +1,48 @@
-// Matrix Client — webview side.
+// Matrix Client — webview side (thin UI).
 //
-// Runs in the Chromium webview that `deno desktop` opens. Imports matrix-js-sdk
-// from a CDN, drives login/sync/timeline/sending, and fires native web
-// Notifications. Talks to the Deno process through `globalThis.bindings.*`
-// (exposed by `win.bind(...)` in main.ts) for the desktop-native bits: dock
-// unread badge, tray tooltip, and focusing the window.
+// Holds NO Matrix SDK. The SDK runs in the Deno process (see matrix.ts);
+// this file just:
+//   - calls bindings (globalThis.bindings.*) exposed by main.ts:
+//       login / restore / getRooms / selectRoom / sendMessage / markRead / logout
+//   - listens to the SSE stream at /events for live updates (sync, rooms, timeline)
+//   - renders the UI and fires native web Notifications
+//
+// Session (homeserver + access token) is persisted here in localStorage so a
+// relaunch skips re-login.
 
-import * as sdk from "https://esm.sh/matrix-js-sdk@41.6.0?target=es2022";
-
-// ── Tiny helpers ─────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "matrix-client.session.v1";
 
-// Call a Deno-side binding, waiting briefly for injection to complete.
+// ── Binding bridge (waits for injection) ────────────────────────────────────
 async function call(name, ...args) {
-  for (let i = 0; i < 40; i++) {
-    const b = globalThis.bindings && globalThis.bindings[name];
-    if (typeof b === "function") {
-      try {
-        return await b(...args);
-      } catch (e) {
-        console.warn(`binding ${name} threw`, e);
-        return undefined;
-      }
-    }
+  for (let i = 0; i < 60; i++) {
+    const fn = globalThis.bindings && globalThis.bindings[name];
+    if (typeof fn === "function") return await fn(...args);
     await new Promise((r) => setTimeout(r, 50));
   }
-  // Binding never appeared — fine, desktop chrome is best-effort.
+  throw new Error(`binding '${name}' is not available`);
 }
-
-// Log to both the webview console and the Deno terminal (great for headless runs).
 function log(...parts) {
   console.log("[matrix]", ...parts);
-  call("log", "info", ...parts.map((p) => (typeof p === "string" ? p : safe(p))));
+  try {
+    globalThis.bindings?.log?.("info", ...parts.map((p) => (typeof p === "string" ? p : safe(p))));
+  } catch { /* ignore */ }
 }
-function safe(v) { try { return JSON.stringify(v); } catch { return String(v); } }
+const safe = (v) => {
+  try { return JSON.stringify(v); } catch { return String(v); }
+};
 
-// ── App state ────────────────────────────────────────────────────────────────
-let client = null;
+// ── State ────────────────────────────────────────────────────────────────────
+let myUserId = null;
 let currentRoomId = null;
 let windowFocused = document.hasFocus();
-const roomEls = new Map(); // roomId -> sidebar element
+const roomEls = new Map();
+let rooms = [];
 
-window.addEventListener("focus", () => { windowFocused = true; if (currentRoomId) clearRoomUnread(currentRoomId); });
+window.addEventListener("focus", () => {
+  windowFocused = true;
+  if (currentRoomId) call("markRead", currentRoomId).catch(() => {});
+});
 window.addEventListener("blur", () => { windowFocused = false; });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
@@ -50,14 +50,21 @@ init().catch((e) => showLoginError(e));
 
 async function init() {
   wireLoginForm();
+  connectEvents();
   const saved = loadSession();
   if (saved) {
-    log("Found saved session for", saved.userId);
+    log("Restoring session for", saved.userId);
     try {
-      await startMatrix(saved);
-      return;
+      const r = await call("restore", saved);
+      if (r?.ok) {
+        myUserId = r.userId || saved.userId;
+        await enterApp();
+        return;
+      }
+      log("restore failed:", r?.error);
+      clearSession();
     } catch (e) {
-      log("Saved session failed, showing login:", String(e));
+      log("restore threw:", String(e));
       clearSession();
     }
   }
@@ -73,13 +80,17 @@ function wireLoginForm() {
     btn.disabled = true;
     btn.textContent = "Signing in…";
     try {
-      const baseUrl = $("homeserver").value.trim().replace(/\/+$/, "") || "https://matrix.org";
-      const token = $("token").value.trim();
-      const session = token
-        ? await loginWithToken(baseUrl, token)
-        : await loginWithPassword(baseUrl, $("username").value.trim(), $("password").value);
-      saveSession(session);
-      await startMatrix(session);
+      const opts = {
+        homeserver: $("homeserver").value.trim() || "https://matrix.org",
+        username: $("username").value.trim(),
+        password: $("password").value,
+        token: $("token").value.trim(),
+      };
+      const r = await call("login", opts);
+      if (!r?.ok) throw new Error(r?.error || "Login failed.");
+      myUserId = r.userId;
+      saveSession(r.session);
+      await enterApp();
     } catch (e) {
       showLoginError(e);
     } finally {
@@ -89,110 +100,76 @@ function wireLoginForm() {
   });
 }
 
-async function loginWithPassword(baseUrl, username, password) {
-  if (!username || !password) throw new Error("Enter a username and password.");
-  const tmp = sdk.createClient({ baseUrl });
-  const res = await tmp.login("m.login.password", {
-    identifier: { type: "m.id.user", user: username },
-    password,
-    initial_device_display_name: "Matrix Client (deno desktop)",
-  });
-  return {
-    baseUrl,
-    accessToken: res.access_token,
-    userId: res.user_id,
-    deviceId: res.device_id,
-  };
-}
-
-async function loginWithToken(baseUrl, accessToken) {
-  const tmp = sdk.createClient({ baseUrl, accessToken });
-  const who = await tmp.whoami(); // { user_id, device_id? }
-  return { baseUrl, accessToken, userId: who.user_id, deviceId: who.device_id };
-}
-
-// ── Start the client & sync ──────────────────────────────────────────────────
-async function startMatrix(session) {
-  client = sdk.createClient({
-    baseUrl: session.baseUrl,
-    accessToken: session.accessToken,
-    userId: session.userId,
-    deviceId: session.deviceId,
-    // No crypto store in this demo — encrypted rooms are shown read-only.
-  });
-
+async function enterApp() {
   showScreen("app");
-  renderMe(session.userId);
-  $("me-status").textContent = "syncing…";
-  call("setTrayTooltip", `Matrix — ${session.userId}`);
-
-  client.on("sync", (state, prev) => {
-    log("sync:", prev, "→", state);
-    if (state === "PREPARED") {
-      $("me-status").textContent = "online";
-      renderRoomList();
-      renderMe(session.userId);
-    } else if (state === "ERROR") {
-      $("me-status").textContent = "connection error";
-    } else if (state === "SYNCING") {
-      $("me-status").textContent = "online";
-    }
-  });
-
-  // Live timeline updates.
-  client.on("Room.timeline", (event, room, toStartOfTimeline, removed, data) => {
-    if (toStartOfTimeline) return;           // back-pagination, not new
-    if (data && data.liveEvent === false) return;
-    onLiveEvent(event, room);
-  });
-
-  // Things that should refresh the sidebar.
-  client.on("Room", () => renderRoomList());
-  client.on("Room.name", () => renderRoomList());
-  client.on("RoomState.events", () => scheduleRoomListRender());
-  client.on("Room.receipt", () => updateUnreadTotal());
-
-  await client.startClient({ initialSyncLimit: 30 });
+  renderMe(myUserId);
+  $("me-status").textContent = "online";
+  ensureNotifPermission();
+  rooms = await call("getRooms");
+  renderRoomList();
 }
 
-// ── Sidebar / room list ──────────────────────────────────────────────────────
-let roomListTimer = null;
-function scheduleRoomListRender() {
-  clearTimeout(roomListTimer);
-  roomListTimer = setTimeout(renderRoomList, 250);
-}
-
-function sortedRooms() {
-  if (!client) return [];
-  return client.getRooms()
-    .filter((r) => r.getMyMembership() === "join")
-    .sort((a, b) => b.getLastActiveTimestamp() - a.getLastActiveTimestamp());
-}
-
-function unreadCount(room) {
+// ── SSE: live updates from the Deno process ─────────────────────────────────
+function connectEvents() {
   try {
-    const n = room.getUnreadNotificationCount?.("total");
-    if (typeof n === "number") return n;
-  } catch { /* fall through */ }
-  try { return room.getUnreadNotificationCount?.() ?? 0; } catch { return 0; }
+    const es = new EventSource("/events");
+    es.onmessage = (ev) => {
+      let e;
+      try { e = JSON.parse(ev.data); } catch { return; }
+      handleEvent(e);
+    };
+    es.onerror = () => { /* EventSource auto-reconnects */ };
+  } catch (e) {
+    log("EventSource unavailable:", String(e));
+  }
 }
 
+function handleEvent(e) {
+  switch (e.kind) {
+    case "sync":
+      if (e.state === "ERROR") $("me-status").textContent = "connection error";
+      else if (e.state === "PREPARED" || e.state === "SYNCING") $("me-status").textContent = "online";
+      break;
+    case "rooms":
+      rooms = e.rooms || [];
+      renderRoomList();
+      break;
+    case "timeline":
+      onTimeline(e);
+      break;
+  }
+}
+
+function onTimeline(e) {
+  const { roomId, roomName, msg } = e;
+  if (roomId === currentRoomId) {
+    const tl = $("timeline");
+    tl.querySelector(".empty-hint")?.remove();
+    const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 80;
+    tl.appendChild(renderMsg(msg, false));
+    if (nearBottom || msg.mine) scrollToBottom();
+    if (windowFocused) call("markRead", roomId).catch(() => {});
+  }
+  const unseen = roomId !== currentRoomId || !windowFocused;
+  if (!msg.mine && unseen && msg.type === "m.room.message") notify(roomName, roomId, msg);
+}
+
+// ── Sidebar ────────────────────────────────────────────────────────────────
 function renderRoomList() {
   const list = $("room-list");
-  const rooms = sortedRooms();
   list.innerHTML = "";
   roomEls.clear();
   for (const room of rooms) {
     const el = document.createElement("div");
     el.className = "room" + (room.roomId === currentRoomId ? " active" : "");
-    const unread = unreadCount(room);
-    if (unread > 0 && room.roomId !== currentRoomId) el.classList.add("unread");
-    el.appendChild(avatarFor(room.name || "?", roomAvatarUrl(room)));
+    const unread = room.roomId === currentRoomId ? 0 : room.unread;
+    if (unread > 0) el.classList.add("unread");
+    el.appendChild(avatarFor(room.name, room.avatarUrl));
     const name = document.createElement("div");
     name.className = "room-name";
-    name.textContent = room.name || room.roomId;
+    name.textContent = room.name;
     el.appendChild(name);
-    if (unread > 0 && room.roomId !== currentRoomId) {
+    if (unread > 0) {
       const badge = document.createElement("div");
       badge.className = "badge";
       badge.textContent = unread > 99 ? "99+" : String(unread);
@@ -202,54 +179,47 @@ function renderRoomList() {
     list.appendChild(el);
     roomEls.set(room.roomId, el);
   }
-  updateUnreadTotal();
 }
 
-function updateUnreadTotal() {
-  let total = 0;
-  for (const room of sortedRooms()) {
-    if (room.roomId === currentRoomId && windowFocused) continue;
-    total += unreadCount(room);
-  }
-  call("setUnread", total);
-}
-
-// ── Open a room & render its timeline ─────────────────────────────────────────
-function selectRoom(roomId) {
+// ── Open a room ────────────────────────────────────────────────────────────
+async function selectRoom(roomId) {
   currentRoomId = roomId;
-  const room = client.getRoom(roomId);
-  if (!room) return;
   for (const [id, el] of roomEls) el.classList.toggle("active", id === roomId);
-  clearRoomUnread(roomId);
+  roomEls.get(roomId)?.classList.remove("unread");
+  roomEls.get(roomId)?.querySelector(".badge")?.remove();
 
-  $("room-title").textContent = room.name || roomId;
-  const topic = roomTopic(room);
-  $("room-topic").textContent = topic || "";
+  let res;
+  try {
+    res = await call("selectRoom", roomId);
+  } catch (e) {
+    log("selectRoom failed:", String(e));
+    return;
+  }
+  if (roomId !== currentRoomId) return; // user switched while loading
 
-  renderTimeline(room);
-  setupComposer(room);
-  renderRoomList();
+  $("room-title").textContent = res.name || roomId;
+  $("room-topic").textContent = res.topic || "";
+  renderTimeline(res.messages || []);
+  setupComposer(roomId, res.encrypted, res.name);
 }
 
-function renderTimeline(room) {
+function renderTimeline(messages) {
   const tl = $("timeline");
   tl.innerHTML = "";
-  const events = room.getLiveTimeline().getEvents();
   let lastSender = null;
   let lastDay = null;
-  for (const event of events) {
-    if (!isRenderable(event)) continue;
-    const day = new Date(event.getTs()).toDateString();
+  for (const msg of messages) {
+    const day = new Date(msg.ts).toDateString();
     if (day !== lastDay) {
       const d = document.createElement("div");
       d.className = "day-divider";
-      d.textContent = dayLabel(event.getTs());
+      d.textContent = dayLabel(msg.ts);
       tl.appendChild(d);
       lastDay = day;
       lastSender = null;
     }
-    tl.appendChild(renderEvent(room, event, event.getSender() === lastSender));
-    lastSender = event.getSender();
+    tl.appendChild(renderMsg(msg, msg.sender === lastSender));
+    lastSender = msg.sender;
   }
   if (!tl.children.length) {
     const e = document.createElement("div");
@@ -260,46 +230,17 @@ function renderTimeline(room) {
   scrollToBottom();
 }
 
-function onLiveEvent(event, room) {
-  // Keep the sidebar fresh.
-  scheduleRoomListRender();
-
-  const isMine = event.getSender() === client.getUserId();
-  const renderable = isRenderable(event);
-
-  // Append to the open room's timeline.
-  if (room.roomId === currentRoomId && renderable) {
-    const tl = $("timeline");
-    const hint = tl.querySelector(".empty-hint");
-    if (hint) hint.remove();
-    const nearBottom = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 80;
-    tl.appendChild(renderEvent(room, event, false));
-    if (nearBottom || isMine) scrollToBottom();
-    if (windowFocused) clearRoomUnread(room.roomId);
-  }
-
-  // Notify for messages from others that you can't currently see.
-  const unseen = room.roomId !== currentRoomId || !windowFocused;
-  if (renderable && !isMine && unseen && event.getType() === "m.room.message") {
-    notify(room, event);
-  }
-  updateUnreadTotal();
-}
-
-// ── Composer / sending ─────────────────────────────────────────────────────────
-function setupComposer(room) {
+// ── Composer ─────────────────────────────────────────────────────────────────
+function setupComposer(roomId, encrypted, name) {
   const form = $("composer");
   const input = $("composer-input");
   form.hidden = false;
-
-  const encrypted = isEncrypted(room);
   form.classList.toggle("disabled", encrypted);
   input.disabled = encrypted;
   input.placeholder = encrypted
     ? "🔒 Encrypted room — sending is disabled in this demo"
-    : `Message ${room.name || ""}`.trim() + "…";
+    : `Message ${name || ""}`.trim() + "…";
 
-  // (Re)bind handlers fresh for the current room.
   input.oninput = () => {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 140) + "px";
@@ -316,18 +257,16 @@ function setupComposer(room) {
     if (!body || encrypted) return;
     input.value = "";
     input.style.height = "auto";
-    try {
-      await client.sendTextMessage(room.roomId, body);
-      // The echo arrives via Room.timeline and renders itself.
-    } catch (err) {
-      log("send failed:", String(err));
-      input.value = body; // restore so the user doesn't lose it
-      flashError(String(err));
+    const r = await call("sendMessage", roomId, body).catch((err) => ({ ok: false, error: String(err) }));
+    if (!r?.ok) {
+      input.value = body; // restore
+      flashError(r?.error || "send failed");
     }
+    // The echo arrives via the SSE 'timeline' event and renders itself.
   };
 }
 
-// ── Notifications ──────────────────────────────────────────────────────────────
+// ── Notifications ──────────────────────────────────────────────────────────
 let notifAsked = false;
 async function ensureNotifPermission() {
   if (notifAsked) return;
@@ -340,171 +279,83 @@ async function ensureNotifPermission() {
     log("notification permission error:", String(e));
   }
 }
-
-function notify(room, event) {
-  call("attention");
+function notify(roomName, roomId, msg) {
+  call("attention").catch(() => {});
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  const sender = displayName(room, event.getSender());
-  const title = room.name && room.name !== sender ? `${sender} (${room.name})` : sender;
+  const title = roomName && roomName !== msg.senderName ? `${msg.senderName} (${roomName})` : msg.senderName;
   try {
     const n = new Notification(title, {
-      body: messageText(event).slice(0, 200),
-      tag: room.roomId,
-      icon: roomAvatarUrl(room) || undefined,
+      body: (msg.body || "").slice(0, 200),
+      tag: roomId,
+      icon: msg.avatarUrl || undefined,
     });
     n.onclick = () => {
-      call("focusWindow");
-      selectRoom(room.roomId);
+      call("focusWindow").catch(() => {});
+      selectRoom(roomId);
     };
   } catch (e) {
     log("notification failed:", String(e));
   }
 }
 
-// ── Rendering primitives ───────────────────────────────────────────────────────
-function isRenderable(event) {
-  const t = event.getType();
-  return t === "m.room.message" || t === "m.room.encrypted";
-}
-
-function renderEvent(room, event, continuation) {
+// ── Rendering primitives ───────────────────────────────────────────────────
+function renderMsg(msg, continuation) {
   const wrap = document.createElement("div");
   wrap.className = "msg" + (continuation ? " cont" : "");
+  wrap.appendChild(avatarFor(msg.senderName, msg.avatarUrl));
 
-  const sender = displayName(room, event.getSender());
-  wrap.appendChild(avatarFor(sender, senderAvatarUrl(room, event.getSender())));
-
-  const bodyEl = document.createElement("div");
-  bodyEl.className = "msg-body";
-
+  const body = document.createElement("div");
+  body.className = "msg-body";
   if (!continuation) {
     const meta = document.createElement("div");
     meta.className = "msg-meta";
     const s = document.createElement("span");
     s.className = "msg-sender";
-    s.textContent = sender;
-    s.style.color = colorFor(event.getSender());
+    s.textContent = msg.senderName;
+    s.style.color = colorFor(msg.sender);
     const time = document.createElement("span");
     time.className = "msg-time";
-    time.textContent = timeLabel(event.getTs());
+    time.textContent = timeLabel(msg.ts);
     meta.append(s, time);
-    bodyEl.appendChild(meta);
+    body.appendChild(meta);
   }
-
   const text = document.createElement("div");
-  const content = event.getContent();
-  if (event.getType() === "m.room.encrypted") {
-    text.className = "msg-text encrypted";
-    text.textContent = "🔒 Encrypted message (decryption is disabled in this demo)";
-  } else {
-    const msgtype = content.msgtype || "m.text";
-    text.className = "msg-text" +
-      (msgtype === "m.notice" ? " notice" : msgtype === "m.emote" ? " emote" : "");
-    text.textContent = messageText(event);
-  }
-  bodyEl.appendChild(text);
-  wrap.appendChild(bodyEl);
+  const encrypted = msg.type === "m.room.encrypted";
+  text.className = "msg-text" +
+    (encrypted ? " encrypted" : msg.msgtype === "m.notice" ? " notice" : msg.msgtype === "m.emote" ? " emote" : "");
+  text.textContent = msg.body;
+  body.appendChild(text);
+  wrap.appendChild(body);
   return wrap;
 }
 
-function messageText(event) {
-  const c = event.getContent() || {};
-  const sender = event.getSender();
-  switch (c.msgtype) {
-    case "m.emote": return `* ${event.sender?.name || sender} ${c.body || ""}`;
-    case "m.image": return `🖼 ${c.body || "image"}`;
-    case "m.file": return `📎 ${c.body || "file"}`;
-    case "m.audio": return `🔊 ${c.body || "audio"}`;
-    case "m.video": return `🎬 ${c.body || "video"}`;
-    default: return c.body || "";
-  }
-}
-
-// ── Avatars / names / colors ─────────────────────────────────────────────────
 function avatarFor(name, url) {
   const el = document.createElement("div");
   el.className = "avatar";
-  if (url) {
-    el.style.backgroundImage = `url("${url}")`;
-  } else {
-    el.textContent = (name || "?").trim().charAt(0) || "?";
-    el.style.background = colorFor(name);
-  }
+  el.textContent = (name || "?").replace(/^[@#!]/, "").trim().charAt(0).toUpperCase() || "?";
+  el.style.background = colorFor(name);
+  if (url) el.style.backgroundImage = `url("${url}")`; // covers the initial if it loads
   return el;
 }
 
-function roomAvatarUrl(room) {
-  try {
-    const mxc = room.getMxcAvatarUrl?.();
-    return mxc ? client.mxcUrlToHttp(mxc, 64, 64, "crop", true) : null;
-  } catch { return null; }
-}
-function senderAvatarUrl(room, userId) {
-  try {
-    const m = room.getMember(userId);
-    const mxc = m && m.getMxcAvatarUrl && m.getMxcAvatarUrl();
-    return mxc ? client.mxcUrlToHttp(mxc, 64, 64, "crop", true) : null;
-  } catch { return null; }
-}
-function displayName(room, userId) {
-  try {
-    const m = room.getMember(userId);
-    if (m && m.name) return m.name;
-  } catch { /* ignore */ }
-  return userId;
-}
-function roomTopic(room) {
-  try {
-    const ev = room.currentState.getStateEvents("m.room.topic", "");
-    return ev?.getContent()?.topic || "";
-  } catch { return ""; }
-}
-function isEncrypted(room) {
-  try {
-    if (typeof room.hasEncryptionStateEvent === "function") return room.hasEncryptionStateEvent();
-    return client.isRoomEncrypted?.(room.roomId) ?? false;
-  } catch { return false; }
-}
-
-const COLORS = ["#0dbd8b","#368bd6","#ac3ba8","#e64f7a","#ff812d","#2dc2c5","#5c56f5","#74d12c"];
+const COLORS = ["#0dbd8b", "#368bd6", "#ac3ba8", "#e64f7a", "#ff812d", "#2dc2c5", "#5c56f5", "#74d12c"];
 function colorFor(key) {
   let h = 0;
   for (let i = 0; i < (key || "").length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return COLORS[h % COLORS.length];
 }
 
-// ── Misc UI ────────────────────────────────────────────────────────────────────
+// ── Misc UI ────────────────────────────────────────────────────────────────
 function renderMe(userId) {
-  const room = currentRoomId ? client?.getRoom(currentRoomId) : null;
-  let name = userId;
-  try {
-    const u = client?.getUser?.(userId);
-    if (u?.displayName) name = u.displayName;
-  } catch { /* ignore */ }
-  $("me-name").textContent = name;
+  $("me-name").textContent = userId || "…";
   const av = $("me-avatar");
-  av.textContent = (name || "?").replace(/^@/, "").charAt(0).toUpperCase();
+  av.textContent = (userId || "?").replace(/^@/, "").charAt(0).toUpperCase();
   av.style.background = colorFor(userId);
 }
-
-function clearRoomUnread(roomId) {
-  const room = client?.getRoom(roomId);
-  if (!room) return;
-  try {
-    const events = room.getLiveTimeline().getEvents();
-    const last = events[events.length - 1];
-    if (last) client.sendReadReceipt(last).catch(() => {});
-  } catch { /* ignore */ }
-  const el = roomEls.get(roomId);
-  if (el) { el.classList.remove("unread"); el.querySelector(".badge")?.remove(); }
-  updateUnreadTotal();
-}
-
 function scrollToBottom() {
   const tl = $("timeline");
   requestAnimationFrame(() => { tl.scrollTop = tl.scrollHeight; });
 }
-
 function timeLabel(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -515,51 +366,40 @@ function dayLabel(ts) {
   if (d.toDateString() === y.toDateString()) return "Yesterday";
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
 }
-
 function showScreen(which) {
   $("login").hidden = which !== "login";
   $("app").hidden = which !== "app";
-  if (which === "app") ensureNotifPermission();
 }
 function showLoginError(e) {
   showScreen("login");
   const el = $("login-error");
   el.hidden = false;
-  el.textContent = humanError(e);
-  log("login error:", String(e?.stack || e));
+  el.textContent = String(e?.message || e);
+  log("login error:", String(e));
 }
 function hideLoginError() { $("login-error").hidden = true; }
 function flashError(msg) {
-  $("me-status").textContent = "⚠ " + msg.slice(0, 60);
-  setTimeout(() => { if (client) $("me-status").textContent = "online"; }, 4000);
-}
-function humanError(e) {
-  const m = String(e?.message || e || "");
-  if (e?.errcode === "M_FORBIDDEN" || /M_FORBIDDEN|Invalid password/i.test(m)) {
-    return "Login failed: wrong username or password.";
-  }
-  if (/fetch|network|Failed to/i.test(m)) return "Network error reaching the homeserver.\n" + m;
-  return "Login failed: " + m;
+  $("me-status").textContent = "⚠ " + String(msg).slice(0, 60);
+  setTimeout(() => { $("me-status").textContent = "online"; }, 4000);
 }
 
-// ── Session persistence ────────────────────────────────────────────────────────
-function saveSession(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* ignore */ } }
+// ── Session persistence (in the webview) ────────────────────────────────────
+function saveSession(s) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
 function loadSession() {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    const s = raw && JSON.parse(raw);
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
     return s && s.accessToken && s.userId ? s : null;
   } catch { return null; }
 }
-function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ } }
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
 
-// Logout button.
 $("logout-btn").addEventListener("click", async () => {
-  try { await client?.logout(true); } catch { /* ignore */ }
-  try { client?.stopClient(); } catch { /* ignore */ }
+  await call("logout").catch(() => {});
   clearSession();
-  client = null;
   currentRoomId = null;
-  call("setUnread", 0);
   location.reload();
 });

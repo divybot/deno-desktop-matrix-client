@@ -1,15 +1,14 @@
-// Headless verification of the Matrix logic that app.js relies on.
-//
-// Runs with the freshly-built `deno` (npm compat), against a local homeserver.
-// It mirrors the exact matrix-js-sdk calls app.js makes — login/register,
-// startClient + "sync"=PREPARED, getRooms(), live "Room.timeline" listener,
-// sendTextMessage — and asserts send/receive works between two users.
+// Headless verification of the real Matrix engine (matrix.ts) — the same code
+// main.ts runs in the Deno process. Exercises login, sync, room list, live
+// timeline (via the engine's onEvent callback), and sending, between two users
+// on a local homeserver.
 //
 //   deno run -A test_matrix.ts <baseUrl>
 //
 // Exit code 0 = all checks passed.
 
 import * as sdk from "npm:matrix-js-sdk@41.6.0";
+import { MatrixEngine } from "./matrix.ts";
 
 const baseUrl = Deno.args[0] ?? "http://localhost:8008";
 const stamp = Date.now().toString(36);
@@ -23,7 +22,7 @@ function check(name: string, cond: boolean, detail = "") {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Register a user through the UIA dummy flow (open registration).
+// Register through the UIA dummy flow (open registration).
 async function register(user: string, password: string) {
   const c = sdk.createClient({ baseUrl });
   try {
@@ -35,106 +34,79 @@ async function register(user: string, password: string) {
   }
 }
 
-async function loginClient(user: string, password: string) {
-  const tmp = sdk.createClient({ baseUrl });
-  const res = await tmp.login("m.login.password", {
-    identifier: { type: "m.id.user", user },
-    password,
-    initial_device_display_name: "test-harness",
-  } as any);
-  const client = sdk.createClient({
-    baseUrl,
-    accessToken: res.access_token,
-    userId: res.user_id,
-    deviceId: res.device_id,
-  });
-  return client;
-}
-
-function waitForPrepared(client: any): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("sync PREPARED timeout")), 40000);
-    client.on("sync", (state: string) => {
-      if (state === "PREPARED") { clearTimeout(t); resolve(); }
-      if (state === "ERROR") { /* keep waiting; transient */ }
-    });
-  });
-}
-
-console.log(`\n=== Matrix logic verification against ${baseUrl} ===`);
+console.log(`\n=== Matrix engine verification against ${baseUrl} ===`);
 console.log(`users: ${alice.user} / ${bob.user}\n`);
 
-// 1. Registration (exercises the homeserver + SDK register path)
 await register(alice.user, alice.password);
 await register(bob.user, bob.password);
 check("register two users", true);
 
-// 2. Login (same call shape as app.js loginWithPassword)
-const a = await loginClient(alice.user, alice.password);
-const b = await loginClient(bob.user, bob.password);
-check("login both (m.login.password)", !!a.getAccessToken() && !!b.getAccessToken(),
-  `${a.getUserId()} / ${b.getUserId()}`);
+// Drive the engine exactly as main.ts does.
+const aliceEngine = new MatrixEngine();
+const bobEngine = new MatrixEngine();
 
-// 3. Alice creates a room and invites Bob
-const { room_id: roomId } = await a.createRoom({
-  name: "Verify Room " + stamp,
-  topic: "deno desktop matrix client test",
-  invite: [b.getUserId()!],
+const aSession = await aliceEngine.loginPassword(baseUrl, alice.user, alice.password);
+const bSession = await bobEngine.loginPassword(baseUrl, bob.user, bob.password);
+check("MatrixEngine.loginPassword for both", !!aSession.accessToken && !!bSession.accessToken,
+  `${aSession.userId} / ${bSession.userId}`);
+
+// Collect Bob's live timeline events through the same onEvent path SSE uses.
+const bobTimeline: any[] = [];
+bobEngine.onEvent = (e) => { if (e.kind === "timeline") bobTimeline.push(e); };
+const aliceTimeline: any[] = [];
+aliceEngine.onEvent = (e) => { if (e.kind === "timeline") aliceTimeline.push(e); };
+
+await aliceEngine.start(aSession);
+await bobEngine.start(bSession);
+check("both engines started + reached PREPARED", aliceEngine.isLoggedIn() && bobEngine.isLoggedIn());
+
+// Alice creates a room and invites Bob (use raw client just for setup).
+const aClient = sdk.createClient({
+  baseUrl, accessToken: aSession.accessToken, userId: aSession.userId, deviceId: aSession.deviceId,
 });
-check("create room + invite", !!roomId, roomId);
+const { room_id: roomId } = await aClient.createRoom({
+  name: "Engine Test " + stamp,
+  topic: "deno desktop matrix client engine test",
+  invite: [bSession.userId],
+});
+const bClient = sdk.createClient({
+  baseUrl, accessToken: bSession.accessToken, userId: bSession.userId, deviceId: bSession.deviceId,
+});
+await bClient.joinRoom(roomId);
+await sleep(2000);
 
-// 4. Start syncing both (app.js: startClient({initialSyncLimit:30}) + sync PREPARED)
-await a.startClient({ initialSyncLimit: 30 });
-await b.startClient({ initialSyncLimit: 30 });
-await Promise.all([waitForPrepared(a), waitForPrepared(b)]);
-check("both clients reached sync=PREPARED", true);
+// getRooms() — same call the getRooms binding makes.
+check("Alice's engine.getRooms() lists the room",
+  aliceEngine.getRooms().some((r) => r.roomId === roomId));
+check("Bob's engine.getRooms() lists the room after joining",
+  bobEngine.getRooms().some((r) => r.roomId === roomId));
 
-// Bob joins the invite
-await b.joinRoom(roomId);
-await sleep(1500);
-
-// 5. Room list populates (app.js: getRooms() filtered to join)
-const aRooms = a.getRooms().filter((r: any) => r.getMyMembership() === "join");
-const bRooms = b.getRooms().filter((r: any) => r.getMyMembership() === "join");
-check("Alice sees the room in her room list", aRooms.some((r: any) => r.roomId === roomId));
-check("Bob sees the room after joining", bRooms.some((r: any) => r.roomId === roomId));
-
-// 6. Live timeline: Bob listens, Alice sends — same listener shape as app.js
+// Live send/receive via engine.send() + onEvent('timeline').
 const body = "Hello from Alice @ " + new Date().toISOString();
-const received = new Promise<any>((resolve) => {
-  b.on("Room.timeline", (event: any, room: any, toStart: boolean) => {
-    if (toStart) return;
-    if (room?.roomId === roomId && event.getType() === "m.room.message" &&
-        event.getContent().body === body) {
-      resolve(event);
-    }
-  });
-});
+await aliceEngine.send(roomId, body);
+await sleep(4000);
+check("Bob's engine emitted a 'timeline' event for the message",
+  bobTimeline.some((e) => e.roomId === roomId && e.msg.body === body),
+  `from ${bobTimeline.at(-1)?.msg?.senderName ?? "?"}`);
 
-await a.sendTextMessage(roomId, body);
-const ev = await Promise.race([received, sleep(15000).then(() => null)]);
-check("Bob receives Alice's message live (Room.timeline)", !!ev,
-  ev ? `from ${ev.getSender()}` : "timed out");
+// getTimeline() history — same call selectRoom binding makes.
+check("engine.getTimeline() returns the message",
+  bobEngine.getTimeline(roomId).some((m) => m.body === body),
+  `${bobEngine.getTimeline(roomId).length} message(s)`);
 
-// 7. Timeline history readable (app.js: getLiveTimeline().getEvents())
-const bRoom = b.getRoom(roomId);
-const msgs = bRoom.getLiveTimeline().getEvents().filter((e: any) => e.getType() === "m.room.message");
-check("message is in Bob's timeline history", msgs.some((e: any) => e.getContent().body === body),
-  `${msgs.length} message event(s)`);
+// Reply back.
+const reply = "Hi Alice! @ " + Date.now();
+await bobEngine.send(roomId, reply);
+await sleep(4000);
+check("Alice's engine received Bob's reply",
+  aliceTimeline.some((e) => e.msg.body === reply));
 
-// 8. Reply back the other direction
-const reply = "Hi Alice, got it! @ " + Date.now();
-const aGot = new Promise<any>((resolve) => {
-  a.on("Room.timeline", (event: any, room: any, toStart: boolean) => {
-    if (!toStart && room?.roomId === roomId && event.getContent()?.body === reply) resolve(event);
-  });
-});
-await b.sendTextMessage(roomId, reply);
-const ev2 = await Promise.race([aGot, sleep(15000).then(() => null)]);
-check("Alice receives Bob's reply live", !!ev2);
+// Unread accounting feeds the dock badge in main.ts.
+check("engine.totalUnread() is a number", typeof bobEngine.totalUnread() === "number",
+  `total=${bobEngine.totalUnread()}`);
 
-a.stopClient();
-b.stopClient();
+await aliceEngine.logout();
+await bobEngine.logout();
 
 console.log(`\n=== ${failures === 0 ? "ALL CHECKS PASSED" : failures + " CHECK(S) FAILED"} ===\n`);
 Deno.exit(failures === 0 ? 0 : 1);

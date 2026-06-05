@@ -11,24 +11,31 @@ plus the desktop-native chrome that `deno desktop` exposes: a **tray icon**, a
 
 ## Architecture
 
-The app follows the recommended `deno desktop` split:
+The **Matrix SDK runs in the Deno process** (not the webview). The webview is a
+thin renderer that calls bindings and listens to a live event stream:
 
 | Side | File | Responsibility |
 | ---- | ---- | -------------- |
-| Deno process (thin) | `main.ts` | Serve the UI over `Deno.serve`, open the `Deno.BrowserWindow`, own the tray / dock badge / window lifecycle, expose small `bind()` handlers. |
-| Webview (Chromium) | `app.js` | Import `matrix-js-sdk` from a CDN; do login, sync, timeline rendering, sending, and fire web `Notification`s. |
+| Deno process | `matrix.ts` | `MatrixEngine`: all `matrix-js-sdk` logic (login, sync, rooms, timeline, send). Framework-agnostic — no webview references — so it's unit-testable headlessly. |
+| Deno process | `main.ts` | Serve the UI + an SSE stream over `Deno.serve`, open the `Deno.BrowserWindow`, expose the engine as `bind()` handlers, forward engine events to the UI, own the tray / dock badge / window lifecycle. |
+| Webview (Chromium) | `app.js` | **No SDK.** Calls bindings, subscribes to the SSE stream, renders, and fires web `Notification`s. |
 | UI | `index.html`, `styles.css` | Static shell served by `main.ts`. |
 
-The webview calls into Deno through the injected `globalThis.bindings.*`
-functions (set up with `win.bind(name, fn)` in `main.ts`):
+`matrix-js-sdk` is pinned to **41.6.0** via `npm:matrix-js-sdk@41.6.0`, imported
+in `matrix.ts` and bundled into the app by `deno desktop`.
 
-- `setUnread(count)` → `Deno.dock.setBadge(...)` + tray tooltip
-- `setTrayTooltip(text)`
-- `focusWindow()` → `win.show()` + `win.focus()` (used on notification click)
-- `attention()` → `Deno.dock.bounce()`
-- `log(level, ...parts)` → prints webview logs in the Deno terminal
+**Webview → Deno** (bindings exposed via `win.bind(name, fn)`):
+`login`, `restore`, `getRooms`, `selectRoom`, `sendMessage`, `markRead`,
+`logout`, plus desktop helpers `focusWindow`, `attention` (`Deno.dock.bounce`),
+and `log` (prints webview logs in the Deno terminal).
 
-`matrix-js-sdk` is pinned to **41.6.0** via `https://esm.sh/matrix-js-sdk@41.6.0`.
+**Deno → Webview** (Server-Sent Events on `GET /events`): the engine pushes
+`{kind:"sync"|"rooms"|"timeline", …}` messages as Matrix events arrive, so the
+sidebar and open timeline update live. The dock unread badge
+(`Deno.dock.setBadge`) is computed in Deno from the engine's unread totals.
+
+Session (homeserver + access token) is persisted in the webview's
+`localStorage`; on relaunch `app.js` calls `restore(session)` to skip login.
 
 ## Prerequisites
 
@@ -124,9 +131,9 @@ Linux, a dir / `.exe` on Windows).
 ## Verifying the Matrix logic headlessly
 
 The desktop GUI needs a display, but the Matrix integration (login, sync, room
-list, **live send/receive**, history) can be verified headlessly against any
-homeserver with `test_matrix.ts`, which exercises the exact `matrix-js-sdk`
-calls `app.js` uses (it imports the SDK via `npm:` instead of the CDN):
+list, **live send/receive**, history) can be verified headlessly with
+`test_matrix.ts`, which drives the **real `MatrixEngine` from `matrix.ts`** (the
+same code `main.ts` runs) against any homeserver:
 
 ```bash
 # Against a local homeserver (e.g. a dev Synapse with open registration):
