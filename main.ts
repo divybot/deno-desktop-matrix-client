@@ -55,6 +55,7 @@ win.addEventListener("blur", () => (windowFocused = false));
 engine.onEvent = (e) => {
   broadcast(e);
   if (e.kind === "rooms" || e.kind === "timeline") updateBadge();
+  if (e.kind === "rooms") refreshTrayMenu();
   if (e.kind === "timeline") maybeNotify(e);
 };
 
@@ -199,6 +200,7 @@ win.bind("logout", async () => {
   deleteSession();
   activeRoomId = null;
   updateBadge();
+  refreshTrayMenu();
   return true;
 });
 
@@ -218,31 +220,224 @@ win.bind("log", async (level, ...parts) => {
 });
 
 // ── Tray icon ───────────────────────────────────────────────────────────────
+// The tray is a quick glance at + jump into unread conversations without
+// focusing the window: it lists your unread rooms (click to open), shows the
+// total, and offers Mark-All-Read / New DM. Rebuilt whenever rooms change.
 let tray: Deno.Tray | null = null;
+
+function trayMenuItems(): Deno.MenuItem[] {
+  const items: Deno.MenuItem[] = [];
+  const signedIn = engine.isLoggedIn();
+  const rooms = signedIn ? engine.getRooms() : [];
+  const total = rooms.reduce((n, r) => n + r.unread, 0);
+  const unread = rooms.filter((r) => r.unread > 0).slice(0, 6);
+
+  items.push({
+    item: {
+      label: !signedIn
+        ? "Not signed in"
+        : total > 0
+        ? `${total} unread message${total === 1 ? "" : "s"}`
+        : "No unread messages",
+      id: "tray-status",
+      enabled: false,
+    },
+  });
+
+  if (unread.length) {
+    items.push("separator");
+    for (const r of unread) {
+      const name = r.name.length > 28 ? r.name.slice(0, 27) + "…" : r.name;
+      items.push({ item: { label: `${name} (${r.unread})`, id: `room:${r.roomId}`, enabled: true } });
+    }
+  }
+
+  items.push("separator");
+  if (signedIn) {
+    items.push({ item: { label: "Mark All as Read", id: "tray-mark-all", enabled: total > 0 } });
+    items.push({ item: { label: "New Direct Message…", id: "tray-new-dm", enabled: true } });
+    items.push("separator");
+  }
+  items.push({ item: { label: "Show Window", id: "show", enabled: true } });
+  items.push({ item: { label: "Quit Matrix", id: "quit", enabled: true } });
+  return items;
+}
+
+function refreshTrayMenu() {
+  try {
+    tray?.setMenu(trayMenuItems());
+  } catch { /* ignore */ }
+}
+
 try {
   tray = new Deno.Tray();
   tray.setIcon(makeTrayIconPng(32));
   tray.setTooltip("Matrix");
-  tray.setMenu([
-    { item: { label: "Show Window", id: "show", enabled: true } },
-    "separator",
-    { item: { label: "Quit", id: "quit", enabled: true } },
-  ]);
+  tray.setMenu(trayMenuItems());
   tray.addEventListener("click", () => {
     win.show();
     win.focus();
   });
-  tray.addEventListener("menuclick", (e) => {
+  tray.addEventListener("menuclick", async (e) => {
     const id = (e as CustomEvent<{ id: string }>).detail.id;
     if (id === "show") {
       win.show();
       win.focus();
     } else if (id === "quit") {
       quit();
+    } else if (id === "tray-mark-all") {
+      engine.markAllRead();
+      updateBadge();
+    } else if (id === "tray-new-dm") {
+      win.show();
+      win.focus();
+      await newDirectMessage();
+    } else if (id.startsWith("room:")) {
+      win.show();
+      win.focus();
+      broadcast({ kind: "openRoom", roomId: id.slice(5) });
     }
   });
 } catch (e) {
   console.error("Tray unavailable:", e);
+}
+
+// ── Native application menu (macOS menu bar / window menu) ────────────────────
+win.setApplicationMenu([
+  // macOS turns the first submenu into the app menu.
+  {
+    submenu: {
+      label: "Matrix",
+      items: [
+        { item: { label: "About Matrix Client", id: "about", enabled: true } },
+        "separator",
+        { role: { role: "hide" } },
+        { role: { role: "quit" } },
+      ],
+    },
+  },
+  {
+    submenu: {
+      label: "File",
+      items: [
+        { item: { label: "New Direct Message…", id: "new-dm", accelerator: "CmdOrCtrl+N", enabled: true } },
+        "separator",
+        { item: { label: "Sign Out", id: "sign-out", enabled: true } },
+      ],
+    },
+  },
+  {
+    submenu: {
+      label: "Edit",
+      items: [
+        { role: { role: "undo" } },
+        { role: { role: "redo" } },
+        "separator",
+        { role: { role: "cut" } },
+        { role: { role: "copy" } },
+        { role: { role: "paste" } },
+        { role: { role: "selectAll" } },
+      ],
+    },
+  },
+  {
+    submenu: {
+      label: "View",
+      items: [
+        { item: { label: "Next Room", id: "next-room", accelerator: "CmdOrCtrl+]", enabled: true } },
+        { item: { label: "Previous Room", id: "prev-room", accelerator: "CmdOrCtrl+[", enabled: true } },
+        "separator",
+        { item: { label: "Mark All as Read", id: "mark-all-read", accelerator: "Shift+CmdOrCtrl+A", enabled: true } },
+        "separator",
+        { item: { label: "Reload", id: "reload", accelerator: "CmdOrCtrl+R", enabled: true } },
+        { item: { label: "Toggle Developer Tools", id: "devtools", accelerator: "Alt+CmdOrCtrl+I", enabled: true } },
+      ],
+    },
+  },
+  {
+    submenu: {
+      label: "Help",
+      items: [
+        { item: { label: "Project Repository…", id: "help-repo", enabled: true } },
+      ],
+    },
+  },
+]);
+
+win.addEventListener("menuclick", async (e) => {
+  const id = (e as CustomEvent<{ id: string }>).detail.id;
+  switch (id) {
+    case "about":
+      safeAlert(
+        "Matrix Client\nA deno desktop demo using matrix-js-sdk." +
+          (engine.userId() ? `\n\nSigned in as ${engine.userId()}` : ""),
+      );
+      break;
+    case "new-dm":
+      await newDirectMessage();
+      break;
+    case "sign-out":
+      await signOut();
+      break;
+    case "next-room":
+      broadcast({ kind: "nav", dir: "next" });
+      break;
+    case "prev-room":
+      broadcast({ kind: "nav", dir: "prev" });
+      break;
+    case "mark-all-read":
+      engine.markAllRead();
+      updateBadge();
+      break;
+    case "reload":
+      win.reload();
+      break;
+    case "devtools":
+      win.openDevtools();
+      break;
+    case "help-repo":
+      safeAlert("https://github.com/divybot/deno-desktop-matrix-client");
+      break;
+  }
+});
+
+// Prompt for a user id (native dialog) and open a DM with them.
+async function newDirectMessage() {
+  if (!engine.isLoggedIn()) return safeAlert("Sign in first.");
+  let uid: string | null = null;
+  try {
+    uid = typeof prompt === "function"
+      ? prompt("Start a direct message with (e.g. @alice:matrix.org):")
+      : null;
+  } catch { /* dialog unavailable */ }
+  uid = uid?.trim() ?? "";
+  if (!uid) return;
+  try {
+    const roomId = await engine.startDirectMessage(uid);
+    win.show();
+    win.focus();
+    broadcast({ kind: "openRoom", roomId });
+  } catch (e) {
+    safeAlert("Could not start DM: " + humanError(e));
+  }
+}
+
+async function signOut() {
+  await engine.logout();
+  deleteSession();
+  activeRoomId = null;
+  updateBadge();
+  refreshTrayMenu();
+  broadcast({ kind: "loggedOut" });
+}
+
+function safeAlert(msg: string) {
+  try {
+    if (typeof alert === "function") alert(msg);
+    else console.log(msg);
+  } catch {
+    console.log(msg);
+  }
 }
 
 // ── Window lifecycle ─────────────────────────────────────────────────────────

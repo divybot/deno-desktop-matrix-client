@@ -191,12 +191,38 @@ export class MatrixEngine {
 
   markRead(roomId: string): void {
     const room = this.client?.getRoom(roomId);
+    this.sendReceipt(room);
+  }
+
+  /** Mark every joined room as read (used by the menu bar / tray). */
+  markAllRead(): void {
+    if (!this.client) return;
+    for (const r of this.client.getRooms()) {
+      if (r.getMyMembership?.() === "join" && unreadCount(r) > 0) this.sendReceipt(r);
+    }
+  }
+
+  private sendReceipt(room: any): void {
     if (!room) return;
     try {
       const events = room.getLiveTimeline().getEvents();
       const last = events[events.length - 1];
       if (last) this.client.sendReadReceipt(last).catch(() => {});
     } catch { /* ignore */ }
+  }
+
+  /** Create (or reuse) a direct-message room with a user and return its id. */
+  async startDirectMessage(userId: string): Promise<string> {
+    if (!this.client) throw new Error("Not signed in.");
+    if (!/^@[^:]+:.+/.test(userId)) {
+      throw new Error("Enter a full user ID like @alice:matrix.org");
+    }
+    const { room_id } = await this.client.createRoom({
+      is_direct: true,
+      invite: [userId],
+      preset: "trusted_private_chat",
+    });
+    return room_id;
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────

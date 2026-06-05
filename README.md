@@ -132,9 +132,24 @@ Linux, a dir / `.exe` on Windows).
 
 ### Desktop features
 
-- **Tray icon** with a tooltip and a *Show Window* / *Quit* menu; clicking the
-  icon shows/focuses the window. Closing the window hides it to the tray — use
-  the tray’s **Quit** to exit.
+- **Tray icon — quick access to unread chats.** Its menu (rebuilt as rooms
+  change) shows the total unread count, lists your **unread rooms** (click one to
+  open it without hunting through the sidebar), and offers **Mark All as Read**,
+  **New Direct Message…**, **Show Window**, and **Quit**. Clicking the icon
+  shows/focuses the window. Closing the window hides it to the tray.
+- **Native menu bar** (`win.setApplicationMenu`), with working actions and
+  accelerators:
+  - **File** — *New Direct Message…* (`⌘N`, prompts for a user id and opens the
+    DM), *Sign Out*.
+  - **Edit** — *Undo / Redo / Cut / Copy / Paste / Select All* (system roles, for
+    the composer).
+  - **View** — *Next / Previous Room* (`⌘]` / `⌘[`), *Mark All as Read*
+    (`⇧⌘A`), *Reload* (`⌘R`), *Toggle Developer Tools*.
+  - **Help** — *Project Repository*. (macOS app menu: *About*, *Hide*, *Quit*.)
+
+  Menu clicks arrive in `main.ts` as `menuclick` events; actions either run on
+  the engine (mark-all-read, new DM, sign out) or are pushed to the UI over SSE
+  (`nav`, `openRoom`, `loggedOut`).
 - **Unread badge** — the total unread count is pushed to `Deno.dock.setBadge()`.
 - **Notifications** — fired from the Deno process for a new message in a room
   that isn’t focused/open; clicking it focuses the window and opens that room.

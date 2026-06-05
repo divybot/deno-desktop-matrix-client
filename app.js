@@ -128,10 +128,28 @@ function handleEvent(e) {
     case "timeline":
       onTimeline(e);
       break;
-    case "openRoom": // a notification was clicked on the Deno side
+    case "openRoom": // a notification (or tray item) was clicked on the Deno side
       selectRoom(e.roomId);
       break;
+    case "nav": // Next/Previous Room from the menu bar
+      navRoom(e.dir);
+      break;
+    case "loggedOut": // Sign Out from the menu bar
+      currentRoomId = null;
+      location.reload();
+      break;
   }
+}
+
+// Move the selection to the next/previous room in the sidebar order.
+function navRoom(dir) {
+  if (!rooms.length) return;
+  let idx = rooms.findIndex((r) => r.roomId === currentRoomId);
+  if (idx === -1) idx = dir === "next" ? -1 : 0;
+  idx = dir === "next" ? idx + 1 : idx - 1;
+  if (idx < 0) idx = rooms.length - 1;
+  if (idx >= rooms.length) idx = 0;
+  selectRoom(rooms[idx].roomId);
 }
 
 function onTimeline(e) {
